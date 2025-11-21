@@ -39,3 +39,10 @@ LANTERN/
 │
 ├── data/                         # raw traffic sequences and processed blocks
 ```
+
+## Baseline Resources
+- (Baseline) CADE: https://github.com/whyisyoung/CADE
+- (Baseline) OWAD: https://github.com/dongtsi/OWAD
+- (Baseline) Mateen: http://github.com/ICL-ml4csec/Mateen
+- (Baseline) Chen: https://github.com/wagner-group/active-learning
+## Acknowledgement

@@ -1,4 +1,4 @@
-name: liveid
+name: lantern
 channels:
   - pytorch
   - conda-forge

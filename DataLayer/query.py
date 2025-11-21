@@ -1,3 +1,4 @@
+# Query raw http(s) logs
 from datetime import datetime, timedelta
 import requests
 import json

@@ -15,3 +15,27 @@ conda activate lantern
 - **Data layer** collects continuous HTTP(S) traffic from global honeypot sensors and maintains both livestream and reference buffers.
 - **Model layer** encodes requests with TFIDF and produces latent representations through a contrastive autoencoder, supporting the classifier and capturing evolving malicious structure.
 - **Drift detection** layer applies LMT from latent representations and PE from classifier outputs, complemented by statistical detectors, and drives adaptive retraining when persistent drift emerges.
+
+## Project Structure
+```
+LANTERN/
+├── system/                       # main LANTERN modules
+│   ├── lantern.py                # full LANTERN pipeline
+│   └──  generalization.py        # generalization test: integration with another data stream
+│
+├── utils/                        # shared utilities for data, drift and models
+│   ├── DataUtils.py              
+│   ├── DriftUtils.py             # LMT, PE and statistical drift indicators
+│   └── ModelUtils.py             
+======================= ↑ Core Components of LANTERN ============================================
+├── DataLayer/                    # data access, queries and preprocessing
+│   ├── datapro.ipynb            
+│   ├── query.py                 
+│   └── seq.py                    # sequence loader and block generator
+│
+├── SOTA/                         # comparison with existing drift detection methods
+│   ├── utils/                    
+│   └── main.py                   # unified baseline evaluation
+│
+├── data/                         # raw traffic sequences and processed blocks
+```

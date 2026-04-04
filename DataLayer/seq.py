@@ -8,8 +8,8 @@ OUTPUT_FOLDER = "../data/sequences"
 WINDOW_SIZE_MINUTES = 60
 
 # === Set your desired date range here ===
-START_DATE = "2025-03-15"  # inclusive
-END_DATE   = "2025-10-15"  # inclusive
+START_DATE = "2025-10-16"  # inclusive
+END_DATE   = "2026-03-25"  # inclusive
 
 for file in sorted(os.listdir(INPUT_FOLDER)):
     if not file.endswith(".csv"):

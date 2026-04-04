@@ -63,12 +63,45 @@ class RFModelTrainer(BaseModelTrainer):
     def predict(self, X):
         return self.model.predict(X)
 
-
 def _to_dense_numpy(X):
     """Accepts np.ndarray or scipy.sparse; returns dense np.ndarray (float32)."""
     if sp.issparse(X):
         X = X.toarray()
     return np.asarray(X, dtype=np.float32)
+
+'''
+def _to_dense_numpy(X, max_gb=30.0, target_dtype=np.float32):
+    """Accepts np.ndarray or scipy.sparse; returns dense np.ndarray with a memory guard."""
+    shape = X.shape
+
+    if sp.issparse(X):
+        source_dtype = X.dtype
+    else:
+        source_dtype = np.asarray(X).dtype
+
+    source_itemsize = np.dtype(source_dtype).itemsize
+    target_itemsize = np.dtype(target_dtype).itemsize
+
+    est_source_gb = (shape[0] * shape[1] * source_itemsize) / (1024 ** 3)
+    est_target_gb = (shape[0] * shape[1] * target_itemsize) / (1024 ** 3)
+
+    print(
+        f"[DENSE] shape={shape}, source_dtype={source_dtype}, "
+        f"source_dense_est={est_source_gb:.2f} GiB, target_dense_est={est_target_gb:.2f} GiB"
+    )
+
+    if est_source_gb > max_gb:
+        raise MemoryError(
+            f"Dense conversion aborted: shape={shape}, source dtype={source_dtype}, "
+            f"would require about {est_source_gb:.2f} GiB before any cast, "
+            f"which exceeds limit of {max_gb:.2f} GiB"
+        )
+
+    if sp.issparse(X):
+        X = X.toarray()
+
+    return np.asarray(X, dtype=target_dtype)
+'''
 
 # ----------------------------------------------------------
 # Autoencoder Trainer (inherits from BaseModelTrainer)
@@ -275,8 +308,10 @@ def build_full_http_text(row, fields):
 class TFIDFTextEncoder:
     """Encodes selected text fields using TF-IDF."""
     def __init__(self, text_fields=None, max_features=2000):
-        self.text_fields = text_fields or ["protocol", "http_method", "http_status", "http_uri", "http_user_agent", "http_referer", "http_body"]
-        self.vectorizer = TfidfVectorizer(max_features=max_features)
+        self.text_fields = text_fields or [
+            "protocol", "http_method", "http_status", 
+            "http_uri", "http_user_agent", "http_referer", "http_body"]
+        self.vectorizer = TfidfVectorizer(max_features=max_features, dtype=np.float32)
 
     def fit_transform(self, df):
         df["http_fulltext"] = df.apply(lambda r: build_full_http_text(r, self.text_fields), axis=1)

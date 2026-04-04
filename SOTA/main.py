@@ -227,7 +227,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run static TF-IDF experiment.")
     parser.add_argument("--start", type=str, default="2025-03-15")
-    parser.add_argument("--end", type=str, default="2025-10-15")
+    parser.add_argument("--end", type=str, default="2026-03-25")
     parser.add_argument("--days", type=int, default=8)
     parser.add_argument("--model", type=str, default="cae")
     parser.add_argument("--out", type=str, default="../data/res/static.csv")

@@ -7,14 +7,15 @@ from requests.auth import HTTPBasicAuth
 import csv
 
 # === Config ===
-USERNAME = "xxx"   # Replace with your username
-PASSWORD = "xxx"     # Replace with your password
-OPENSEARCH_HOST = "xxx" # Replace with your OpenSearch host
-INDEX_PATTERN = "xxx"
+USERNAME = "aide-ucl"
+PASSWORD = "63Ed1068a7aa4ab248!"
+OPENSEARCH_HOST = "https://os.gcaaide.org"
+INDEX_PATTERN = "proxypot-2"
+
 HEADERS = {"Content-Type": "application/json"}
 
-START_DATE = "2025-03-15"
-END_DATE = "2025-07-15"
+START_DATE = "2025-12-11"
+END_DATE = "2026-03-25"
 
 # === Daily date iterator ===
 def daterange(start, end):

@@ -14,8 +14,22 @@ from utils.DriftUtils import (
     compute_lmt_reference, compute_lmt_block
 )
 
+
+import gc
+
+try:
+    import torch
+except ImportError:
+    torch = None
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"     # keep logical order
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"           # GPU #1
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"           # GPU #1
 
 
 # =========================================================
@@ -42,6 +56,24 @@ def save_json_safely(obj, path):
     with open(path, "w") as f:
         json.dump(obj_safe, f, indent=4)
     print(f"[SAVE] Entropy reference saved → {path}")
+
+def safe_delete(local_vars, *names):
+    for name in names:
+        if name in local_vars:
+            del local_vars[name]
+
+def cleanup_memory(tag=None):
+    gc.collect()
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if tag:
+        print(f"[MEM] Cleanup: {tag}")
+
+def log_ram(tag):
+    if psutil is None:
+        return
+    rss_gb = psutil.Process(os.getpid()).memory_info().rss / (1024 ** 3)
+    print(f"[RAM] {tag}: RSS={rss_gb:.2f} GiB")
 
 # =========================================================
 # Main Experiment
@@ -74,11 +106,14 @@ def run_experiment_entropy_lmt(
 
     # --- Fill initial window ---
     window_files = deque(maxlen=N_BLOCKS)
+    history_files = deque(maxlen=N_BLOCKS)  
+
     print(f"[INIT] Filling {N_BLOCKS}-block initial window...")
     for _ in tqdm(range(N_BLOCKS)):
         try:
             f = next(file_stream)
             window_files.append(f)
+            history_files.append(f)
         except StopIteration:
             raise RuntimeError("Not enough blocks to initialize window!")
 
@@ -93,9 +128,13 @@ def run_experiment_entropy_lmt(
 
     # --- Process stream ---
     for seq_file in tqdm(file_stream, desc="Evaluating"):
+        #always update chronological history
+        history_files.append(seq_file)
+
         df_block = DataUtils.concatenate_blocks([seq_file])
         df_block = DataUtils.preprocess_labels(df_block)
         if df_block.empty:
+            #block_index += 1
             continue
 
         X_block = encoder.transform(df_block)
@@ -121,7 +160,7 @@ def run_experiment_entropy_lmt(
         trigger_entropy_lmt = entropy_dec and lmt_dec
         trigger_lmt_stable = (lmt_count >= 8)
         decision_any = trigger_entropy_lmt or trigger_lmt_stable
-        # decision_any = 0   # For static case
+        #decision_any = 0   # For static case
 
         # --- Identify which condition triggered ---
         if trigger_entropy_lmt and not trigger_lmt_stable:
@@ -161,9 +200,32 @@ def run_experiment_entropy_lmt(
             if lmt_dec:
                 print(f"  ↳ LMT score = {mean_lmt_score:.4f} (ratio={lmt_sample_ratio:.4f})")
 
-            window_files.append(seq_file)
-            encoder, model_trainer, entropy_ref, baseline_shapes, lmt_ref = train_window(window_files, max_features, retrain_id, output_csv)
+            # rebuild Wref as the most recent N_BLOCKS ending at current block
+            window_files = deque(history_files, maxlen=N_BLOCKS)  # Start with recent history
 
+            print(f"[Retrain {retrain_id}] Rebuilt window covers latest {len(window_files)} blocks")
+            print(f"[Retrain {retrain_id}] First file: {window_files[0]}")
+            print(f"[Retrain {retrain_id}] Last file:  {window_files[-1]}")
+
+            #encoder, model_trainer, entropy_ref, baseline_shapes, lmt_ref = train_window(window_files, max_features, retrain_id, output_csv)
+            #free current block level objects before retraining
+            safe_delete(locals(), "df_block", "X_block", "y_block", "metrics", "recon_errors")
+            cleanup_memory(f"Before retrain {retrain_id}")
+
+            if psutil is not None:
+                log_ram(f"Before retrain {retrain_id}")
+            
+            encoder, model_trainer, entropy_ref, baseline_shapes, lmt_ref = train_window(
+                window_files, 
+                max_features, 
+                retrain_id, 
+                output_csv,
+                max_train_rows=3000000,
+                log_memory=True)
+
+        safe_delete(locals(), "df_block", "X_block", "y_block", "metrics", "recon_errors")
+        #del df_block, X_block, y_block, metrics, recon_errors
+        cleanup_memory(f"End of block {block_index}")
         block_index += 1
 
     # --- Save metrics ---
@@ -174,12 +236,23 @@ def run_experiment_entropy_lmt(
     return metric_df
 
 
-def train_window(window_files, max_features, retrain_id, output_csv):
+def train_window(window_files, max_features, retrain_id, output_csv, max_train_rows=None, log_memory=True):
     """Load and train model on the most recent window."""
+    if log_memory:
+        log_ram(f"train_window {retrain_id} start")
+
     df_train = DataUtils.concatenate_blocks(list(window_files))
     df_train = DataUtils.preprocess_labels(df_train)
     if df_train.empty:
         raise RuntimeError("Empty training window")
+
+    # optional safety cap
+    if max_train_rows is not None and len(df_train) > max_train_rows:
+        df_train = df_train.tail(max_train_rows)
+        print(f"[TRAIN] Capped training data to last {max_train_rows} rows")
+
+    if log_memory:
+        log_ram(f"train_window {retrain_id} after loading data")
 
     encoder = TFIDFTextEncoder(max_features=max_features)
     X_train = encoder.fit_transform(df_train)
@@ -189,10 +262,15 @@ def train_window(window_files, max_features, retrain_id, output_csv):
     model_trainer.fit(X_train, y_train)
     print(f"[TRAIN] Model trained on {len(df_train)} samples ({len(window_files)} blocks)")
 
+    if log_memory:
+        log_ram(f"train_window {retrain_id} after fit")
+
     entropy_ref = compute_entropy_reference(model_trainer, X_train, y_train)
     baseline_shapes, lmt_ref = compute_lmt_reference(model_trainer, X_train, y_train)
 
-    
+    if log_memory:
+        log_ram(f"train_window {retrain_id} after computing references")
+
     # save to file
     baseline_dir = os.path.join(os.path.dirname(output_csv), "entropy_refs")
     baseline_path = os.path.join(baseline_dir, f"entropy_ref_{retrain_id:03d}.json")
@@ -203,6 +281,13 @@ def train_window(window_files, max_features, retrain_id, output_csv):
     baseline_path = os.path.join(baseline_dir, f"lmt_ref_{retrain_id:03d}.json")
     save_json_safely(lmt_ref, baseline_path)
 
+    # free large temporary training objects
+    del df_train, X_train, y_train
+    cleanup_memory(f"train_window {retrain_id} end")
+
+    if log_memory:
+        log_ram(f"train_window {retrain_id} final")
+
     return encoder, model_trainer, entropy_ref, baseline_shapes, lmt_ref
 
 
@@ -210,7 +295,7 @@ def train_window(window_files, max_features, retrain_id, output_csv):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Adaptive experiment with dummy drift (always retrain).")
     parser.add_argument("--data", type=str, default="../data/sequences", help="Base data directory")
-    parser.add_argument("--start", type=str, default="2025-03-15", help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--start", type=str, default="2025-03-16", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, default="2025-10-15", help="End date (YYYY-MM-DD)")
     parser.add_argument("--days", type=int, default=8, help="Window length in days (default=8)")
     parser.add_argument("--out", type=str, default="../data/res/dynamictest/dynamictest.csv", help="Output CSV path")
@@ -222,4 +307,5 @@ if __name__ == "__main__":
         start_date=args.start,
         end_date=args.end,
         window_days=args.days,
+        max_features=2000,
     )

@@ -1,7 +1,276 @@
 # utils/DriftUtils.py
 import numpy as np
 
+# ======================================================
+# (1) Core Computations
+# ======================================================
 
+def empirical_p_value(current_score, reference_scores, larger_is_more_abnormal=True):
+    """
+    Conformal style empirical p value.
+
+    current_score: scalar score of current block
+    reference_scores: list or np.ndarray of reference block scores
+    """
+    ref = np.asarray(reference_scores, dtype=float)
+
+    if larger_is_more_abnormal:
+        count = np.sum(ref >= current_score)
+    else:
+        count = np.sum(ref <= current_score)
+
+    return (count + 1.0) / (len(ref) + 1.0)
+
+
+def fuse_drift_evidence(p_lmt, p_pe, eps=1e-12):
+    """
+    Z_t = -log p_lmt - log p_pe
+    """
+    p_lmt = max(float(p_lmt), eps)
+    p_pe = max(float(p_pe), eps)
+    return -np.log(p_lmt) - np.log(p_pe)
+
+
+def sequential_accumulation(prev_g, z_t, nu):
+    """
+    G_t = max(0, G_{t-1} + Z_t - nu)
+    """
+    return max(0.0, float(prev_g) + float(z_t) - float(nu))
+
+# ======================================================
+# (2) LMT Indicator
+# ======================================================
+def compute_baseline_shapes(Z_base, Y_base, classes, regularization=1e-6):
+    shapes = {}
+    for c in classes:
+        Zc = Z_base[Y_base == c]
+        if len(Zc) == 0:
+            continue
+        mu_c = np.mean(Zc, axis=0)
+        cov_est = LedoitWolf().fit(Zc)
+        Sigma_c = cov_est.covariance_ + regularization * np.eye(Zc.shape[1])
+        shapes[c] = (mu_c, Sigma_c)
+    return shapes
+
+
+def compute_lmt_scores(Z_block, Y_pred, baseline_shapes):
+    all_scores = []
+    per_class_scores = {}
+    for c, (mu_c, Sigma_c) in baseline_shapes.items():
+        Zc = Z_block[Y_pred == c]
+        if len(Zc) == 0:
+            continue
+        inv_Sigma = np.linalg.inv(Sigma_c)
+        diffs = Zc - mu_c
+        d2 = np.sum(diffs @ inv_Sigma * diffs, axis=1)
+        per_class_scores[c] = np.mean(d2)
+        all_scores.extend(d2)
+    return per_class_scores, all_scores
+
+# compute_lmt_block: see later part
+
+# ======================================================
+# (3) PE Indicator
+# ======================================================
+def compute_entropy_score(model_trainer, X_block, entropy_ref, use_mad=False):
+    """
+    Compute mean predictive entropy and drifted sample ratio for one block.
+
+    Returns:
+        H_block: mean entropy over all samples
+        drift_ratio: fraction of samples exceeding decision threshold
+        H_i: per-sample entropy array
+    """
+    z_block = model_trainer.encode(X_block)
+    probs = model_trainer.classifier.predict_proba(z_block)
+    probs = np.asarray(probs, dtype=float)
+
+    noise = np.random.uniform(0.001, 0.005, size=probs.shape)
+    probs = probs + noise
+    probs = (probs + 1e-3) / (1 + 1e-3 * probs.shape[1])
+    probs = probs / probs.sum(axis=1, keepdims=True)
+    probs_safe = np.clip(probs, 1e-12, 1.0)
+
+    H_i = -np.sum(probs_safe * np.log(probs_safe), axis=1)
+    H_block = float(np.mean(H_i))
+
+    # threshold for individual samples
+    if use_mad:
+        thr_individual = entropy_ref["thr_mad_decision"]
+    else:
+        thr_individual = entropy_ref["thr_std_decision"]
+
+    drift_ratio = float(np.mean(H_i > thr_individual))
+    print(f"[Entropy] Block mean entropy={H_block:.4f}, drift_ratio={drift_ratio:.4f}")
+    return H_block, drift_ratio, H_i
+
+
+
+# ======================================================
+# (4) CONFORMAL + FUSED EVIDENCE + SEQUENTIAL HELPERS
+# ======================================================
+
+def compute_reference_block_scores(
+    window_files,
+    data_utils,
+    encoder,
+    model_trainer,
+    entropy_ref,
+    baseline_shapes,
+    lmt_ref,
+    use_mad_lmt=True,
+):
+    """
+    Compute block level PE and LMT scores for every block in the current
+    reference window. These scores are used for conformal calibration.
+
+    Returns
+    -------
+    ref_pe_scores : list[float]
+    ref_lmt_scores : list[float]
+    """
+    ref_pe_scores = []
+    ref_lmt_scores = []
+
+    for seq_file in window_files:
+        try:
+            df_block = data_utils.concatenate_blocks([seq_file])
+            df_block = data_utils.preprocess_labels(df_block)
+        except Exception as e:
+            print(f"[WARN] Skipping reference block {seq_file}: {e}")
+            continue
+
+        if df_block.empty:
+            continue
+
+        X_block = encoder.transform(df_block)
+        y_block = df_block["category"].values
+
+        pe_score, _, _ = compute_entropy_score(
+            model_trainer, X_block, entropy_ref, use_mad=False
+        )
+
+        lmt_score, _, _, _, _ = compute_lmt_block(
+            model_trainer,
+            X_block,
+            y_block,
+            baseline_shapes,
+            lmt_ref,
+            use_mad=use_mad_lmt,
+        )
+
+        ref_pe_scores.append(float(pe_score))
+        ref_lmt_scores.append(float(lmt_score))
+
+    return ref_pe_scores, ref_lmt_scores
+
+
+def compute_reference_z_scores(ref_pe_scores, ref_lmt_scores):
+    """
+    Compute reference fused evidence values Z_t from reference block scores.
+    """
+    ref_z_scores = []
+
+    for pe_s, lmt_s in zip(ref_pe_scores, ref_lmt_scores):
+        p_pe = empirical_p_value(pe_s, ref_pe_scores, larger_is_more_abnormal=True)
+        p_lmt = empirical_p_value(lmt_s, ref_lmt_scores, larger_is_more_abnormal=True)
+        z_t = fuse_drift_evidence(p_lmt, p_pe)
+        ref_z_scores.append(float(z_t))
+
+    return ref_z_scores
+
+def compute_nu(ref_z_scores, method="median"):
+    """
+    Compute sequential baseline allowance nu from reference Z scores.
+    """
+    ref_z_scores = np.asarray(ref_z_scores, dtype=float)
+
+    if len(ref_z_scores) == 0:
+        raise RuntimeError("[SEQ] Empty reference Z scores, cannot compute nu")
+
+    if method == "median":
+        return float(np.median(ref_z_scores))
+    elif method == "mean":
+        return float(np.mean(ref_z_scores))
+    elif method == "q75":
+        return float(np.quantile(ref_z_scores, 0.75))
+    else:
+        raise ValueError(f"[SEQ] Unsupported nu method: {method}")
+
+def compute_block_drift_evidence(
+    model_trainer,
+    X_block,
+    y_block,
+    entropy_ref,
+    baseline_shapes,
+    lmt_ref,
+    ref_pe_scores,
+    ref_lmt_scores,
+    use_mad_lmt=True,
+):
+    """
+    Full per block drift pipeline.
+
+    Returns
+    -------
+    drift_info : dict containing
+        entropy_score
+        entropy_drift_ratio
+        lmt_mean_score
+        lmt_sample_drift_ratio
+        per_class_scores
+        p_pe
+        p_lmt
+        z_evidence
+    """
+    entropy_score, entropy_drift_ratio, _ = compute_entropy_score(
+        model_trainer, X_block, entropy_ref, use_mad=False
+    )
+
+    lmt_mean_score, lmt_sample_drift_ratio, per_class_scores, _, _ = compute_lmt_block(
+        model_trainer,
+        X_block,
+        y_block,
+        baseline_shapes,
+        lmt_ref,
+        use_mad=use_mad_lmt,
+    )
+
+    p_pe = empirical_p_value(
+        entropy_score, ref_pe_scores, larger_is_more_abnormal=True
+    )
+    p_lmt = empirical_p_value(
+        lmt_mean_score, ref_lmt_scores, larger_is_more_abnormal=True
+    )
+
+    z_evidence = fuse_drift_evidence(p_lmt, p_pe)
+
+    return {
+        "entropy_score": float(entropy_score),
+        "entropy_drift_ratio": float(entropy_drift_ratio),
+        "lmt_mean_score": float(lmt_mean_score),
+        "lmt_sample_drift_ratio": float(lmt_sample_drift_ratio),
+        "per_class_scores": per_class_scores,
+        "p_pe": float(p_pe),
+        "p_lmt": float(p_lmt),
+        "z_evidence": float(z_evidence),
+    }
+
+def update_sequential_state(prev_g, z_t, nu, h):
+    """
+    Update sequential statistic and return new state plus trigger flag.
+    """
+    g_t = sequential_accumulation(prev_g, z_t, nu)
+    decision = bool(g_t > h)
+    return g_t, decision
+
+
+# ======================================================
+# ======================================================
+# ======================================================
+# ======================================================
+# ======================================================
+# ======================================================
 # ======================================================
 # (1) ENTROPY REFERENCE (training window)
 # ======================================================
@@ -33,8 +302,8 @@ def compute_entropy_reference(model_trainer, X_train, y_train):
     thr_std_decision = mu + 3.0 * sigma
 
     print(f"[EntropyRef] median={med:.4f}, MAD={mad:.4f}, mean={mu:.4f}, std={sigma:.4f}")
-    print(f"[EntropyRef] thr_mad_monitor={thr_mad_monitor:.4f}, thr_mad_decision={thr_mad_decision:.4f}")
-    print(f"[EntropyRef] thr_std_monitor={thr_std_monitor:.4f}, thr_std_decision={thr_std_decision:.4f}")
+    #print(f"[EntropyRef] thr_mad_monitor={thr_mad_monitor:.4f}, thr_mad_decision={thr_mad_decision:.4f}")
+    #print(f"[EntropyRef] thr_std_monitor={thr_std_monitor:.4f}, thr_std_decision={thr_std_decision:.4f}")
 
     return {
         "entropy_median": med,
@@ -308,34 +577,6 @@ def compute_lmt_block(
 
     return mean_lmt_score, drift_ratio_samples, per_class_scores, lmt_mon, lmt_dec
 
-
-# ---------- Core computations ----------
-def compute_baseline_shapes(Z_base, Y_base, classes, regularization=1e-6):
-    shapes = {}
-    for c in classes:
-        Zc = Z_base[Y_base == c]
-        if len(Zc) == 0:
-            continue
-        mu_c = np.mean(Zc, axis=0)
-        cov_est = LedoitWolf().fit(Zc)
-        Sigma_c = cov_est.covariance_ + regularization * np.eye(Zc.shape[1])
-        shapes[c] = (mu_c, Sigma_c)
-    return shapes
-
-
-def compute_lmt_scores(Z_block, Y_pred, baseline_shapes):
-    all_scores = []
-    per_class_scores = {}
-    for c, (mu_c, Sigma_c) in baseline_shapes.items():
-        Zc = Z_block[Y_pred == c]
-        if len(Zc) == 0:
-            continue
-        inv_Sigma = np.linalg.inv(Sigma_c)
-        diffs = Zc - mu_c
-        d2 = np.sum(diffs @ inv_Sigma * diffs, axis=1)
-        per_class_scores[c] = np.mean(d2)
-        all_scores.extend(d2)
-    return per_class_scores, all_scores
 
 
 def compute_lmt_thresholds(history_scores, k_monitor=3.0, k_decision=3.0):

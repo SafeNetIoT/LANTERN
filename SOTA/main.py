@@ -21,7 +21,8 @@ from utils.DriftUtils import (
     run_drift_detection,
     compute_cade_reference, cade_fast_detect,
     _owad_fit_calibrator, owad_run,
-    compute_chen_reference, chen_fast_detect
+    compute_chen_reference, chen_fast_detect,
+    compute_gidx_reference, gidx_fast_detect, 
 )
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -140,6 +141,14 @@ def run_static_experiment(
         print("[CHEN] Building reference pseudo-loss...")
         chen_ref_stats = compute_chen_reference(model_trainer, X_train, y_train)
 
+
+    # G-idx baseline
+    gidx_ref_stats = None
+    if "gidx" in drift_methods:
+        print("[GIDX] Building reference...")
+        gidx_ref_stats = compute_gidx_reference(model_trainer, X_train, y_train)
+        
+
     # =========================================================
     # Evaluate future blocks
     # =========================================================
@@ -193,9 +202,22 @@ def run_static_experiment(
             metrics["drift_chen_score"] = score
 
         # -----------------------------------------------------
+        # G-idx (ENIDrift-style)
+        # -----------------------------------------------------
+        if "gidx" in drift_methods:
+            drift, score = gidx_fast_detect(
+                model_trainer,
+                X_block,
+                y_block,
+                gidx_ref_stats
+            )
+            metrics["drift_gidx_detected"] = drift
+            metrics["drift_gidx_score"] = score
+            
+        # -----------------------------------------------------
         # KL & Mateen via unified interface
         # -----------------------------------------------------
-        other_methods = [m for m in drift_methods if m not in ["cade", "owad", "chen"]]
+        other_methods = [m for m in drift_methods if m not in ["cade", "owad", "chen", "gidx"]]
         if other_methods:
             results = run_drift_detection(train_recon_errors, recon_errors, other_methods)
             for m, (drift, score) in results.items():

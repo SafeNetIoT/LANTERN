@@ -301,7 +301,7 @@ class ContrastiveModelTrainer:
         self,
         latent_dim=64,
         cae_lr=1e-3,
-        cae_epochs=10,
+        cae_epochs=20,
         cae_batch_size=512,
         cae_patience=2,
         lambda_contrast=0.1,

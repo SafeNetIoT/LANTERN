@@ -10,10 +10,14 @@ import argparse
 from utils import DataUtils
 from utils.ModelUtils import TFIDFTextEncoder, ContrastiveModelTrainer
 from utils.DriftUtils import (
-    compute_entropy_reference, compute_entropy_score, detect_entropy_drift,
-    compute_lmt_reference, compute_lmt_block
+    compute_entropy_reference,
+    compute_lmt_reference,
+    compute_reference_block_scores,
+    compute_reference_z_scores,
+    compute_nu,
+    compute_block_drift_evidence,
+    update_sequential_state,
 )
-
 
 import gc
 
@@ -29,7 +33,7 @@ except ImportError:
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"     # keep logical order
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"           # GPU #1
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"           # GPU #1
 
 
 # =========================================================
@@ -87,6 +91,9 @@ def run_experiment_entropy_lmt(
     window_days=8,
     blocks_per_day=24,
     max_features=2000,
+    h_value=8.0,
+    nu_method="median",
+    static_calibration=True,
 ):
     N_BLOCKS = window_days * blocks_per_day
     metric_log = []
@@ -118,12 +125,35 @@ def run_experiment_entropy_lmt(
             raise RuntimeError("Not enough blocks to initialize window!")
 
     # --- Initial training, trainer and entropy references ---
-    encoder, model_trainer, entropy_ref, baseline_shapes, lmt_ref = train_window(window_files, max_features, retrain_id, output_csv)
-
+    # encoder, model_trainer, entropy_ref, baseline_shapes, lmt_ref = train_window(window_files, max_features, retrain_id, output_csv)
+    (encoder,
+    model_trainer,
+    entropy_ref,
+    baseline_shapes,
+    lmt_ref,
+    ref_pe_scores,
+    ref_lmt_scores,
+    ref_z_scores,
+    nu,
+    ) = train_window(
+    window_files,
+    max_features,
+    retrain_id,
+    output_csv,
+    metric_log=metric_log,
+    max_train_rows=3000000,
+    log_memory=True,
+    nu_method=nu_method,
+    )
     block_index = N_BLOCKS + 1
     
+    # sequential state
+    g_stat = 0.0
+    h = float(h_value)
+    print(f"[SEQ] h = {h:.3f}")
+    print(f"[SEQ] nu = {nu:.6f}")
     # --- Initialize memory for temporal consistency ---
-    recent_lmt_decisions = deque(maxlen=10)
+    # recent_lmt_decisions = deque(maxlen=10)
 
 
     # --- Process stream ---
@@ -144,6 +174,7 @@ def run_experiment_entropy_lmt(
             continue
         
         # --- Drift detection ---
+        '''
         entropy_score, drift_ratio, _ = compute_entropy_score(model_trainer, X_block, entropy_ref, use_mad=False)
         entropy_mon, entropy_dec = detect_entropy_drift(entropy_score, entropy_ref, use_mad=False)
 
@@ -189,9 +220,51 @@ def run_experiment_entropy_lmt(
             "retrain_trigger_source": retrain_trigger,
 
         })
+        '''
+        # --- New drift pipeline: conformal calibration + fused evidence + sequential accumulation ---
+        drift_info = compute_block_drift_evidence(
+            model_trainer=model_trainer,
+            X_block=X_block,
+            y_block=y_block,
+            entropy_ref=entropy_ref,
+            baseline_shapes=baseline_shapes,
+            lmt_ref=lmt_ref,
+            ref_pe_scores=ref_pe_scores,
+            ref_lmt_scores=ref_lmt_scores,
+            use_mad_lmt=True,
+        )
+
+        g_stat, decision_any = update_sequential_state(
+            prev_g=g_stat,
+            z_t=drift_info["z_evidence"],
+            nu=nu,
+            h=h,
+        )
+
+        metrics.update({
+            "block_index": block_index,
+            "file": seq_file,
+            "retrain_id": retrain_id,
+            "data_split": "test",
+            "entropy_score": drift_info["entropy_score"],
+            "entropy_drift_ratio": drift_info["entropy_drift_ratio"],
+            "lmt_mean_score": drift_info["lmt_mean_score"],
+            "lmt_sample_drift_ratio": drift_info["lmt_sample_drift_ratio"],
+            "p_pe": drift_info["p_pe"],
+            "p_lmt": drift_info["p_lmt"],
+            "z_evidence": drift_info["z_evidence"],
+            "g_stat": g_stat,
+            "nu": nu,
+            "h": h,
+            "trigger_decision": int(decision_any),
+            **{f"lmt_{c}_score": v for c, v in drift_info["per_class_scores"].items()},
+            "nu_method": nu_method,
+        })
         metric_log.append(metrics)
 
+        
         # --- Adaptive retraining ---
+        '''
         if decision_any:
             retrain_id += 1
             print(f"[Retrain {retrain_id}] Triggered at block {block_index}")
@@ -222,6 +295,58 @@ def run_experiment_entropy_lmt(
                 output_csv,
                 max_train_rows=3000000,
                 log_memory=True)
+        '''
+
+        if decision_any and not static_calibration:
+            retrain_id += 1
+            print(f"[Retrain {retrain_id}] Triggered at block {block_index}")
+            print(f"  ↳ PE score = {drift_info['entropy_score']:.6f}, p_pe = {drift_info['p_pe']:.6f}")
+            print(f"  ↳ LMT score = {drift_info['lmt_mean_score']:.6f}, p_lmt = {drift_info['p_lmt']:.6f}")
+            print(f"  ↳ Z_t = {drift_info['z_evidence']:.6f}, G_t = {g_stat:.6f}, nu = {nu:.6f}, h = {h:.6f}")
+
+            # rebuild Wref as the most recent N_BLOCKS ending at current block
+            window_files = deque(history_files, maxlen=N_BLOCKS)
+
+            print(f"[Retrain {retrain_id}] Rebuilt window covers latest {len(window_files)} blocks")
+            print(f"[Retrain {retrain_id}] First file: {window_files[0]}")
+            print(f"[Retrain {retrain_id}] Last file:  {window_files[-1]}")
+
+            safe_delete(locals(), "df_block", "X_block", "y_block", "metrics", "recon_errors", "drift_info")
+            cleanup_memory(f"Before retrain {retrain_id}")
+
+            if psutil is not None:
+                log_ram(f"Before retrain {retrain_id}")
+
+            (
+                encoder,
+                model_trainer,
+                entropy_ref,
+                baseline_shapes,
+                lmt_ref,
+                ref_pe_scores,
+                ref_lmt_scores,
+                ref_z_scores,
+                nu,
+            ) = train_window(
+                window_files,
+                max_features,
+                retrain_id,
+                output_csv,
+                metric_log = metric_log,
+                max_train_rows=3000000,
+                log_memory=True,
+                nu_method=nu_method,
+            )
+
+            # reset sequential statistic after update
+            g_stat = 0.0
+
+        if decision_any and static_calibration:
+            print(f"[STATIC TRIGGER] block {block_index} | "
+                  f"PE={drift_info['entropy_score']:.6f}, "
+                  f"LMT={drift_info['lmt_mean_score']:.6f}, "
+                  f"Z_t={drift_info['z_evidence']:.6f}, "
+                  f"G_t={g_stat:.6f}, nu={nu:.6f}, h={h:.6f}")
 
         safe_delete(locals(), "df_block", "X_block", "y_block", "metrics", "recon_errors")
         #del df_block, X_block, y_block, metrics, recon_errors
@@ -236,7 +361,7 @@ def run_experiment_entropy_lmt(
     return metric_df
 
 
-def train_window(window_files, max_features, retrain_id, output_csv, max_train_rows=None, log_memory=True):
+def train_window(window_files, max_features, retrain_id, output_csv, metric_log=None, max_train_rows=None, log_memory=True, nu_method="median",):
     """Load and train model on the most recent window."""
     if log_memory:
         log_ram(f"train_window {retrain_id} start")
@@ -254,6 +379,7 @@ def train_window(window_files, max_features, retrain_id, output_csv, max_train_r
     if log_memory:
         log_ram(f"train_window {retrain_id} after loading data")
 
+    
     encoder = TFIDFTextEncoder(max_features=max_features)
     X_train = encoder.fit_transform(df_train)
     y_train = df_train["category"].values
@@ -261,7 +387,7 @@ def train_window(window_files, max_features, retrain_id, output_csv, max_train_r
     model_trainer = ContrastiveModelTrainer()
     model_trainer.fit(X_train, y_train)
     print(f"[TRAIN] Model trained on {len(df_train)} samples ({len(window_files)} blocks)")
-
+    
     if log_memory:
         log_ram(f"train_window {retrain_id} after fit")
 
@@ -270,6 +396,77 @@ def train_window(window_files, max_features, retrain_id, output_csv, max_train_r
 
     if log_memory:
         log_ram(f"train_window {retrain_id} after computing references")
+    
+
+    ref_pe_scores, ref_lmt_scores = compute_reference_block_scores(
+        window_files=window_files,
+        data_utils=DataUtils,
+        encoder=encoder,
+        model_trainer=model_trainer,
+        entropy_ref=entropy_ref,
+        baseline_shapes=baseline_shapes,
+        lmt_ref=lmt_ref,
+        use_mad_lmt=True,
+    )
+
+    ref_z_scores = compute_reference_z_scores(ref_pe_scores, ref_lmt_scores)
+    nu = compute_nu(ref_z_scores, method=nu_method)
+
+    # ---------------------------------------------------------
+    # Store reference block data into the same metric log
+    # ---------------------------------------------------------
+    if metric_log is not None:
+        for i, ref_file in enumerate(window_files):
+            ref_df_block = DataUtils.concatenate_blocks([ref_file])
+            ref_df_block = DataUtils.preprocess_labels(ref_df_block)
+            if ref_df_block.empty:
+                continue
+
+            X_ref_block = encoder.transform(ref_df_block)
+            y_ref_block = ref_df_block["category"].values
+            ref_metrics, _ = model_trainer.evaluate(X_ref_block, y_ref_block)
+
+            drift_info_ref = compute_block_drift_evidence(
+                model_trainer=model_trainer,
+                X_block=X_ref_block,
+                y_block=y_ref_block,
+                entropy_ref=entropy_ref,
+                baseline_shapes=baseline_shapes,
+                lmt_ref=lmt_ref,
+                ref_pe_scores=ref_pe_scores,
+                ref_lmt_scores=ref_lmt_scores,
+                use_mad_lmt=True,
+            )
+
+            ref_metrics.update({
+                "block_index": i + 1,
+                "reference_block_pos": i + 1,
+                "file": ref_file,
+                "retrain_id": retrain_id,
+                "data_split": "reference",
+                "entropy_score": drift_info_ref["entropy_score"],
+                "entropy_drift_ratio": drift_info_ref["entropy_drift_ratio"],
+                "lmt_mean_score": drift_info_ref["lmt_mean_score"],
+                "lmt_sample_drift_ratio": drift_info_ref["lmt_sample_drift_ratio"],
+                "p_pe": drift_info_ref["p_pe"],
+                "p_lmt": drift_info_ref["p_lmt"],
+                "z_evidence": drift_info_ref["z_evidence"],
+                "g_stat": np.nan,
+                "nu": nu,
+                "h": np.nan,
+                "trigger_decision": 0,
+                **{f"lmt_{c}_score": v for c, v in drift_info_ref["per_class_scores"].items()},
+                "nu_method": nu_method,
+            })
+            metric_log.append(ref_metrics)
+
+            del ref_df_block, X_ref_block, y_ref_block, ref_metrics, drift_info_ref
+            cleanup_memory(f"Reference block logging retrain_id={retrain_id}, idx={i}")
+
+            
+    if log_memory:
+        log_ram(f"train_window {retrain_id} after reference block scores")
+
 
     # save to file
     baseline_dir = os.path.join(os.path.dirname(output_csv), "entropy_refs")
@@ -288,7 +485,17 @@ def train_window(window_files, max_features, retrain_id, output_csv, max_train_r
     if log_memory:
         log_ram(f"train_window {retrain_id} final")
 
-    return encoder, model_trainer, entropy_ref, baseline_shapes, lmt_ref
+    return (
+        encoder,
+        model_trainer,
+        entropy_ref,
+        baseline_shapes,
+        lmt_ref,
+        ref_pe_scores,
+        ref_lmt_scores,
+        ref_z_scores,
+        nu,
+    )
 
 
 # --- CLI entry ---
@@ -296,9 +503,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Adaptive experiment with dummy drift (always retrain).")
     parser.add_argument("--data", type=str, default="../data/sequences", help="Base data directory")
     parser.add_argument("--start", type=str, default="2025-03-16", help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end", type=str, default="2025-10-15", help="End date (YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, default="2025-03-25", help="End date (YYYY-MM-DD)")
     parser.add_argument("--days", type=int, default=8, help="Window length in days (default=8)")
-    parser.add_argument("--out", type=str, default="../data/res/dynamictest/dynamictest.csv", help="Output CSV path")
+    parser.add_argument("--out", type=str, default="../data/res/calibration/reference.csv", help="Output CSV path")
+
+    # NEW
+    parser.add_argument("--h", type=float, default=8.0, help="Sequential threshold h")
+    parser.add_argument("--nu_method", type=str, default="median", choices=["median", "mean", "q75"], help="Method to compute nu")
+    parser.add_argument("--static", action="store_true", help="Run static calibration (no retraining)")
+
     args = parser.parse_args()
 
     run_experiment_entropy_lmt(
@@ -308,4 +521,7 @@ if __name__ == "__main__":
         end_date=args.end,
         window_days=args.days,
         max_features=2000,
+        h_value=args.h,
+        nu_method=args.nu_method,
+        static_calibration=args.static,
     )

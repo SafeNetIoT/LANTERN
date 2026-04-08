@@ -5,6 +5,7 @@ from scipy.stats import ks_2samp
 from scipy.special import rel_entr
 from sklearn.isotonic import IsotonicRegression
 from sklearn.neighbors import NearestNeighbors
+from sklearn.covariance import LedoitWolf
 
 
 # =========================================================
@@ -227,6 +228,296 @@ def cade_fast_detect(z_block, ref_stats, sigma_k=3.0):
     score = float(np.mean(scores))
     return score > thr, score
 
+
+def compute_cade_class_reference(model_trainer, X_train, y_train):
+    """
+    Build class-conditional CADE reference.
+
+    For each class c:
+        mu_c     = centroid
+        d_tilde  = median distance to centroid
+        MAD_c    = MAD of distances
+    """
+    z_train = model_trainer.encode(X_train)
+    y_train = np.asarray(y_train, dtype=object)
+
+    ref = {}
+
+    for c in np.unique(y_train):
+        Zc = z_train[y_train == c]
+        if len(Zc) < 2:
+            continue
+
+        mu_c = np.mean(Zc, axis=0)
+        dists = np.linalg.norm(Zc - mu_c, axis=1)
+
+        med_c = np.median(dists)
+        mad_c = 1.4826 * np.median(np.abs(dists - med_c))
+        mad_c = max(float(mad_c), 1e-9)
+
+        ref[c] = {
+            "mu": mu_c,
+            "med": float(med_c),
+            "mad": float(mad_c),
+        }
+
+    if len(ref) == 0:
+        raise RuntimeError("No valid class reference built for CADE.")
+
+    # Global threshold from training samples using min over classes
+    train_scores = []
+    for z in z_train:
+        per_class_scores = []
+        for c, stats in ref.items():
+            dist = np.linalg.norm(z - stats["mu"])
+            score = abs(dist - stats["med"]) / stats["mad"]
+            per_class_scores.append(score)
+        train_scores.append(min(per_class_scores))
+
+    train_scores = np.asarray(train_scores, dtype=float)
+    global_med = np.median(train_scores)
+    global_mad = 1.4826 * np.median(np.abs(train_scores - global_med))
+    global_mad = max(float(global_mad), 1e-9)
+
+    ref["_global"] = {
+        "median": float(global_med),
+        "mad": float(global_mad),
+    }
+
+    return ref
+
+def cade_score_min_over_classes(z_block, cade_class_ref):
+    all_scores = []
+
+    for z in z_block:
+        per_class_scores = []
+
+        for c, stats in cade_class_ref.items():
+            if c == "_global":
+                continue
+
+            mu_c = stats["mu"]
+            med_c = stats["med"]
+            mad_c = stats["mad"]
+
+            dist = np.linalg.norm(z - mu_c)
+            score = abs(dist - med_c) / mad_c
+            per_class_scores.append(score)
+
+        if len(per_class_scores) > 0:
+            all_scores.append(min(per_class_scores))
+
+    if len(all_scores) == 0:
+        return np.nan
+
+    return float(np.mean(all_scores))
+
+# =========================================================
+# ENIDrift G-idx (Block-level)
+# =========================================================
+def _gidx_score(probs, y_true, lam=0.8):
+    preds = np.argmax(probs, axis=1)
+    conf = np.max(probs, axis=1)
+
+    var_term = float(np.var(conf))                 # instability
+    err_term = float(np.mean(preds != y_true))     # error
+
+    score = lam * var_term + (1.0 - lam) * err_term
+    return score, var_term, err_term
+
+
+'''
+def _gidx_score(probs, lam=0.75):
+    probs = np.asarray(probs, dtype=float)
+    probs = np.clip(probs, 1e-12, 1.0)
+    probs = probs / probs.sum(axis=1, keepdims=True)
+
+    conf = np.max(probs, axis=1)
+
+    # instability across samples
+    var_term = float(np.var(conf))
+
+    # average uncertainty surrogate
+    err_term = float(1.0 - np.mean(conf))
+
+    score = lam * var_term + (1.0 - lam) * err_term
+    return score, var_term, err_term
+'''
+
+def compute_gidx_reference(model, X_train, y_train, lam=0.8, k_mad=3.0):
+    probs = model.classifier.predict_proba(model.encode(X_train))
+
+    # split into pseudo-blocks
+    n = len(y_train)
+    block_size = max(32, n // 100)  # simple heuristic
+
+    scores = []
+    for i in range(0, n, block_size):
+        p_blk = probs[i:i+block_size]
+        y_blk = y_train[i:i+block_size]
+        if len(y_blk) == 0:
+            continue
+
+        s, _, _ = _gidx_score(p_blk, y_blk, lam)
+        scores.append(s)
+
+    scores = np.asarray(scores)
+
+    med = np.median(scores)
+    mad = 1.4826 * np.median(np.abs(scores - med))
+    mad = max(mad, 1e-9)
+
+    return {
+        "median": float(med),
+        "mad": float(mad),
+        "lam": lam,
+        "k_mad": k_mad
+    }
+
+
+
+def gidx_fast_detect(model, X_block, y_block, ref_stats):
+    z = model.encode(X_block)
+    probs = model.classifier.predict_proba(z)
+
+    score, var_term, err_term = _gidx_score(
+        probs,
+        y_block,
+        lam=ref_stats["lam"]
+    )
+
+    thr = ref_stats["median"] + ref_stats["k_mad"] * ref_stats["mad"]
+    drift = score > thr
+
+    return drift, float(score)
+
+# =========================================================
+# PE (Predictive Entropy)
+# =========================================================
+def compute_entropy_reference(model_trainer, X_train, y_train):
+    z_train = model_trainer.encode(X_train)
+    probs = model_trainer.classifier.predict_proba(z_train)
+    probs = np.asarray(probs, dtype=float)
+
+    probs = (probs + 1e-3) / (1 + 1e-3 * probs.shape[1])
+    probs = probs / probs.sum(axis=1, keepdims=True)
+    probs_safe = np.clip(probs, 1e-12, 1.0)
+
+    entropy_vals = -np.sum(probs_safe * np.log(probs_safe), axis=1)
+
+    med = np.median(entropy_vals)
+    mad = 1.4826 * np.median(np.abs(entropy_vals - med))
+    mad = max(mad, 1e-9)
+
+    mu = np.mean(entropy_vals)
+    std = np.std(entropy_vals)
+    std = max(std, 1e-9)
+
+    return {
+        "median": float(med),
+        "mad": float(mad),
+        "mean": float(mu),
+        "std": float(std),
+    }
+
+
+def pe_fast_detect(model_trainer, X_block, entropy_ref, k_mad=3.0):
+    z_block = model_trainer.encode(X_block)
+    probs = model_trainer.classifier.predict_proba(z_block)
+    probs = np.asarray(probs, dtype=float)
+
+    probs = (probs + 1e-3) / (1 + 1e-3 * probs.shape[1])
+    probs = probs / probs.sum(axis=1, keepdims=True)
+    probs_safe = np.clip(probs, 1e-12, 1.0)
+
+    H_i = -np.sum(probs_safe * np.log(probs_safe), axis=1)
+    score = float(np.mean(H_i))
+
+    thr = entropy_ref["median"] + k_mad * entropy_ref["mad"]
+    return score > thr, score
+
+# =========================================================
+# LMT (Latent Mahalanobis Typicality)
+# =========================================================
+def compute_lmt_scores(Z_block, Y_pred, baseline_shapes):
+    all_scores = []
+    per_class_scores = {}
+
+    for c, (mu_c, Sigma_c) in baseline_shapes.items():
+        Zc = Z_block[Y_pred == c]
+        if len(Zc) == 0:
+            continue
+
+        inv_Sigma = np.linalg.inv(Sigma_c)
+        diffs = Zc - mu_c
+        d2 = np.sum(diffs @ inv_Sigma * diffs, axis=1)
+
+        per_class_scores[c] = float(np.mean(d2))
+        all_scores.extend(d2)
+
+    return per_class_scores, all_scores
+
+
+def compute_lmt_reference(
+    model_trainer,
+    X_train,
+    y_train,
+    n_blocks=20,
+    k_mad=3.0,
+):
+    Z_train = model_trainer.encode(X_train)
+    classes = np.unique(y_train)
+
+    baseline_shapes = {}
+    for c in classes:
+        Zc = Z_train[y_train == c]
+        if len(Zc) < 2:
+            continue
+
+        mu_c = np.mean(Zc, axis=0)
+        cov_est = LedoitWolf().fit(Zc)
+        Sigma_c = cov_est.covariance_ + 1e-6 * np.eye(Zc.shape[1])
+        baseline_shapes[c] = (mu_c, Sigma_c)
+
+    history_scores = []
+    X_chunks = np.array_split(X_train, n_blocks)
+    y_chunks = np.array_split(y_train, n_blocks)
+
+    for Xi, yi in zip(X_chunks, y_chunks):
+        Zi = model_trainer.encode(Xi)
+        _, all_scores = compute_lmt_scores(Zi, yi, baseline_shapes)
+        if len(all_scores) > 0:
+            history_scores.append(float(np.mean(all_scores)))
+
+    history_scores = np.asarray(history_scores, dtype=float)
+
+    med = np.median(history_scores)
+    mad = 1.4826 * np.median(np.abs(history_scores - med))
+    mad = max(mad, 1e-9)
+
+    return baseline_shapes, {
+        "median": float(med),
+        "mad": float(mad),
+    }
+
+
+def lmt_fast_detect(
+    model_trainer,
+    X_block,
+    y_block,
+    baseline_shapes,
+    lmt_ref,
+    k_mad=3.0,
+):
+    Z_block = model_trainer.encode(X_block)
+
+    _, all_scores = compute_lmt_scores(Z_block, y_block, baseline_shapes)
+    if len(all_scores) == 0:
+        return False, 0.0
+
+    score = float(np.mean(all_scores))
+    thr = lmt_ref["median"] + k_mad * lmt_ref["mad"]
+    return score > thr, score
 
 # =========================================================
 # Unified Drift Detection Wrapper

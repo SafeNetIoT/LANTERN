@@ -45,10 +45,10 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 FILES = {
     "Benign": "BenignTraffic.pcap.csv",  #360000
-    "SYN Flood": "DoS-SYN_Flood3.pcap.csv", #250000
+    #"SYN Flood": "DoS-SYN_Flood3.pcap.csv", #250000
     "HTTP Flood": "DDoS-HTTP_Flood.pcap.csv",  #28000
     "DNS_Spoofing": "DNS_Spoofing.pcap.csv",  #170000
-    "Dictionary Brute Force": "DictionaryBruteForce.pcap.csv",  #13000
+    #"Dictionary Brute Force": "DictionaryBruteForce.pcap.csv",  #13000
     "OS Scan": "Recon-OSScan.pcap.csv",  #98000
     "Command Injection":"CommandInjection.pcap.csv", #5400
     "BrowserHijacking": "BrowserHijacking.pcap.csv",  #5800
@@ -58,10 +58,10 @@ FILES = {
 
 CLASS_ORDER = [
     "Benign",
-    "SYN Flood",
+    #"SYN Flood",
     "HTTP Flood",
     #"DNS_Spoofing",
-    "Dictionary Brute Force",
+    #"Dictionary Brute Force",
     "OS Scan",
     "Command Injection",
     "BrowserHijacking",
@@ -226,15 +226,16 @@ def compute_conditional_scores(
     unseen_class,
     cade_ref,
     chen_ref,
+    gidx_ref,
     pe_ref,
     baseline_shapes,
-    lmt_ref,
+    train_recon_errors,
 ):
     """
-    Compute class-conditional drift scores for:
-    - Benign
-    - Seen attack classes mean (excluding benign)
-    - Unseen class
+    Compute class conditional drift scores for:
+    - benign
+    - seen attack classes mean (excluding benign)
+    - unseen class
     """
     y_test = np.asarray(y_test, dtype=object)
 
@@ -250,7 +251,6 @@ def compute_conditional_scores(
         elif method_name == "chen":
             _, score = chen_fast_detect(model_trainer, X_sub, y_sub, chen_ref)
             return float(score)
-        
 
         elif method_name == "mateen":
             test_recon_sub = extract_recon_errors(model_trainer, X_sub, y_sub)
@@ -264,7 +264,6 @@ def compute_conditional_scores(
         elif method_name == "pe":
             _, score = pe_fast_detect(model_trainer, X_sub, pe_ref)
             return float(score)
-        
 
         elif method_name == "lmt":
             score = lmt_score_with_predicted_class(
@@ -278,17 +277,20 @@ def compute_conditional_scores(
             raise ValueError(f"Unsupported method: {method_name}")
 
     out = {}
+    cond_methods = ["cade", "chen", "mateen", "gidx", "pe", "lmt"]
 
+    # benign
     benign_mask = (y_test == "Benign")
     X_benign = X_test[benign_mask]
     y_benign = y_test[benign_mask]
 
-    for method in ["cade", "chen", "pe", "lmt"]:
+    for method in cond_methods:
         out[f"{method}_score_benign"] = _subset_score(method, X_benign, y_benign)
 
+    # seen mean
     seen_attack_classes = [c for c in seen_classes if c != "Benign"]
 
-    for method in ["cade", "chen", "pe", "lmt"]:
+    for method in cond_methods:
         seen_scores = []
         for cls in seen_attack_classes:
             cls_mask = (y_test == cls)
@@ -298,28 +300,23 @@ def compute_conditional_scores(
                 continue
             seen_scores.append(_subset_score(method, X_cls, y_cls))
 
-        out[f"{method}_score_seen_mean"] = float(np.mean(seen_scores)) if len(seen_scores) > 0 else np.nan
+        out[f"{method}_score_seen_mean"] = (
+            float(np.mean(seen_scores)) if len(seen_scores) > 0 else np.nan
+        )
 
-    unseen_mask = (y_test == unseen_class)
-    X_unseen = X_test[unseen_mask]
-    y_unseen = y_test[unseen_mask]
-
-    for method in ["cade", "chen", "pe", "lmt"]:
-        out[f"{method}_score_unseen"] = _subset_score(method, X_unseen, y_unseen)
-
-    # --- unseen ---
+    # unseen
     if unseen_class is None:
-        for method in ["cade", "chen", "pe", "lmt"]:
+        for method in cond_methods:
             out[f"{method}_score_unseen"] = np.nan
     else:
         unseen_mask = (y_test == unseen_class)
         X_unseen = X_test[unseen_mask]
         y_unseen = y_test[unseen_mask]
 
-        for method in ["cade", "chen", "pe", "lmt"]:
+        for method in cond_methods:
             out[f"{method}_score_unseen"] = _subset_score(method, X_unseen, y_unseen)
-    return out
 
+    return out
 
 # =========================================================
 # Data preparation
@@ -519,14 +516,14 @@ def main():
         X_test=X_test,
         y_test=y_test,
         seen_classes=seen_classes,
-        unseen_class=None,  # KEY
+        unseen_class=unseen_class,
         cade_ref=cade_ref,
         chen_ref=chen_ref,
+        gidx_ref=gidx_ref,
         pe_ref=pe_ref,
         baseline_shapes=baseline_shapes,
-        lmt_ref=lmt_ref,
+        train_recon_errors=train_recon_errors,
     )
-
     row = {
         "stage_id": 0,
         "seen_classes": " | ".join(seen_classes),
@@ -540,16 +537,35 @@ def main():
         "accuracy": float(accuracy),
         "f1_macro": float(f1_macro),
 
+        "cade_detected": np.nan,
         "cade_score": float(cade_score),
-        "chen_score": float(chen_score),
-        "mateen_score": float(mateen_score),
-        "gidx_score": float(gidx_score),
-        "pe_score": float(pe_score),
-        "lmt_score": float(lmt_score),
-    }
 
-    row.update(conditional_scores)
-    rows.append(row)
+        "chen_detected": bool(chen_detected),
+        "chen_score": float(chen_score),
+
+        "mateen_detected": bool(mateen_detected),
+        "mateen_score": float(mateen_score),
+
+        "gidx_detected": bool(gidx_detected),
+        "gidx_score": float(gidx_score),
+
+        "pe_detected": bool(pe_detected),
+        "pe_score": float(pe_score),
+
+        "lmt_detected": np.nan,
+        "lmt_score": float(lmt_score),
+
+        "gidx_ref_median": float(gidx_ref["median"]),
+        "gidx_ref_mad": float(gidx_ref["mad"]),
+
+        "pe_ref_median": float(pe_ref["median"]),
+        "pe_ref_mad": float(pe_ref["mad"]),
+        "pe_ref_mean": float(pe_ref["mean"]),
+        "pe_ref_std": float(pe_ref["std"]),
+
+        "lmt_ref_median": float(lmt_ref["median"]),
+        "lmt_ref_mad": float(lmt_ref["mad"]),
+    }
 
 
     # ================================
@@ -683,9 +699,11 @@ def main():
             unseen_class=unseen_class,
             cade_ref=cade_ref,
             chen_ref=chen_ref,
+            gidx_ref=gidx_ref,
             pe_ref=pe_ref,
             baseline_shapes=baseline_shapes,
-            lmt_ref=lmt_ref,
+            train_recon_errors=train_recon_errors,
+            #lmt_ref=lmt_ref,
         )
 
         row = {
@@ -783,6 +801,16 @@ def main():
                 "chen_score_benign",
                 "chen_score_seen_mean",
                 "chen_score_unseen",
+
+                "mateen_score",
+                "mateen_score_benign",
+                "mateen_score_seen_mean",
+                "mateen_score_unseen",
+
+                "gidx_score",
+                "gidx_score_benign",
+                "gidx_score_seen_mean",
+                "gidx_score_unseen",
 
                 "pe_score",
                 "pe_score_benign",

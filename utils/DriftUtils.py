@@ -188,12 +188,26 @@ def compute_nu(ref_z_scores, method="median"):
     if len(ref_z_scores) == 0:
         raise RuntimeError("[SEQ] Empty reference Z scores, cannot compute nu")
 
+    mu = float(np.mean(ref_z_scores))
+    sigma = float(np.std(ref_z_scores))
+
     if method == "median":
         return float(np.median(ref_z_scores))
     elif method == "mean":
-        return float(np.mean(ref_z_scores))
+        return mu
     elif method == "q75":
         return float(np.quantile(ref_z_scores, 0.75))
+    
+    # --- sigma-based options ---
+    elif method == "1sigma":
+        return mu + 1.0 * sigma
+
+    elif method == "2sigma":
+        return mu + 2.0 * sigma
+
+    elif method == "3sigma":
+        return mu + 3.0 * sigma
+    
     else:
         raise ValueError(f"[SEQ] Unsupported nu method: {method}")
 
@@ -572,7 +586,7 @@ def compute_lmt_block(
     print(
         f"[LMT] Block mean (weighted)={mean_lmt_score:.4f}, "
         f"sample_ratio={drift_ratio_samples:.4f}, "
-        f"monitor={lmt_mon}, decision={lmt_dec}"
+        #f"monitor={lmt_mon}, decision={lmt_dec}"
     )
 
     return mean_lmt_score, drift_ratio_samples, per_class_scores, lmt_mon, lmt_dec

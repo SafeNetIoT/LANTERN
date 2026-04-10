@@ -92,11 +92,13 @@ def run_experiment_entropy_lmt(
     blocks_per_day=24,
     max_features=2000,
     h_value=8.0,
-    nu_method="median",
+    nu_method="3sigma",
     static_calibration=True,
 ):
     N_BLOCKS = window_days * blocks_per_day
-    metric_log = []
+    #metric_log = []
+    reference_log = []
+    test_log = []
     retrain_id = 0
 
     # --- Chronological stream ---
@@ -140,7 +142,7 @@ def run_experiment_entropy_lmt(
     max_features,
     retrain_id,
     output_csv,
-    metric_log=metric_log,
+    reference_log = reference_log,
     max_train_rows=3000000,
     log_memory=True,
     nu_method=nu_method,
@@ -174,53 +176,6 @@ def run_experiment_entropy_lmt(
             continue
         
         # --- Drift detection ---
-        '''
-        entropy_score, drift_ratio, _ = compute_entropy_score(model_trainer, X_block, entropy_ref, use_mad=False)
-        entropy_mon, entropy_dec = detect_entropy_drift(entropy_score, entropy_ref, use_mad=False)
-
-        mean_lmt_score, lmt_sample_ratio, per_class_scores, lmt_mon, lmt_dec = compute_lmt_block(
-            model_trainer, X_block, y_block, baseline_shapes, lmt_ref, use_mad=True
-        )
-        
-
-      # --- Update temporal LMT memory ---
-        recent_lmt_decisions.append(lmt_dec)
-        lmt_count = sum(recent_lmt_decisions)
-
-        # --- Combined retrain rule ---
-        trigger_entropy_lmt = entropy_dec and lmt_dec
-        trigger_lmt_stable = (lmt_count >= 8)
-        decision_any = trigger_entropy_lmt or trigger_lmt_stable
-        #decision_any = 0   # For static case
-
-        # --- Identify which condition triggered ---
-        if trigger_entropy_lmt and not trigger_lmt_stable:
-            retrain_trigger = "entropy_lmt_both" 
-        elif trigger_lmt_stable and not trigger_entropy_lmt:
-            retrain_trigger = f"lmt_stable({lmt_count}/10)"
-        elif trigger_entropy_lmt and trigger_lmt_stable:
-            retrain_trigger = f"both_conditions({lmt_count}/10)"
-        else:
-            retrain_trigger = "none"
-
-
-        metrics.update({
-            "block_index": block_index,
-            "file": seq_file,
-            "retrain_id": retrain_id,
-            "entropy_score": entropy_score,
-            "entropy_drift_ratio": drift_ratio,
-            "entropy_monitor": entropy_mon,
-            "entropy_decision": entropy_dec,
-            "lmt_mean_score": mean_lmt_score,
-            "lmt_sample_drift_ratio": lmt_sample_ratio,
-            **{f"lmt_{c}_score": v for c, v in per_class_scores.items()},
-            "lmt_monitor": lmt_mon,
-            "lmt_decision": lmt_dec,
-            "retrain_trigger_source": retrain_trigger,
-
-        })
-        '''
         # --- New drift pipeline: conformal calibration + fused evidence + sequential accumulation ---
         drift_info = compute_block_drift_evidence(
             model_trainer=model_trainer,
@@ -234,11 +189,30 @@ def run_experiment_entropy_lmt(
             use_mad_lmt=True,
         )
 
+        '''
         g_stat, decision_any = update_sequential_state(
             prev_g=g_stat,
             z_t=drift_info["z_evidence"],
             nu=nu,
             h=h,
+        )
+        '''
+        g_prev = g_stat
+        g_stat, decision_any = update_sequential_state(
+            prev_g=g_stat,
+            z_t=drift_info["z_evidence"],
+            nu=nu,
+            h=h,
+        )
+
+        print(
+            f"[SEQ] block={block_index} | "
+            f"Z={drift_info['z_evidence']:.6f} | "
+            f"G_prev={g_prev:.6f} | "
+            f"G={g_stat:.6f} | "
+            f"nu={nu:.6f} | "
+            f"h={h:.6f} | "
+            f"trigger={int(decision_any)}"
         )
 
         metrics.update({
@@ -260,7 +234,7 @@ def run_experiment_entropy_lmt(
             **{f"lmt_{c}_score": v for c, v in drift_info["per_class_scores"].items()},
             "nu_method": nu_method,
         })
-        metric_log.append(metrics)
+        test_log.append(metrics)
 
         
         # --- Adaptive retraining ---
@@ -332,7 +306,7 @@ def run_experiment_entropy_lmt(
                 max_features,
                 retrain_id,
                 output_csv,
-                metric_log = metric_log,
+                reference_log = reference_log,
                 max_train_rows=3000000,
                 log_memory=True,
                 nu_method=nu_method,
@@ -353,15 +327,35 @@ def run_experiment_entropy_lmt(
         cleanup_memory(f"End of block {block_index}")
         block_index += 1
 
-    # --- Save metrics ---
-    metric_df = pd.DataFrame(metric_log)
-    os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-    metric_df.to_csv(output_csv, index=False)
-    print(f"Metrics saved → {output_csv}")
-    return metric_df
+    # --- Save metrics seperately ---
+    out_dir = os.path.dirname(output_csv)
+    os.makedirs(out_dir, exist_ok=True)
+
+    reference_csv = os.path.join(out_dir, "reference_blocks.csv")
+    test_csv = os.path.join(out_dir, "test_blocks.csv")
+
+    reference_df = pd.DataFrame(reference_log)
+    test_df = pd.DataFrame(test_log)
+
+    reference_df.to_csv(reference_csv, index=False)
+    test_df.to_csv(test_csv, index=False)
+
+    print(f"Reference metrics saved → {reference_csv}")
+    print(f"Test metrics saved → {test_csv}")
+
+    return reference_df, test_df
 
 
-def train_window(window_files, max_features, retrain_id, output_csv, metric_log=None, max_train_rows=None, log_memory=True, nu_method="median",):
+def train_window(
+        window_files, 
+        max_features, 
+        retrain_id, 
+        output_csv, 
+        reference_log=None, 
+        max_train_rows=None, 
+        log_memory=True, 
+        nu_method="3sigma",
+    ):
     """Load and train model on the most recent window."""
     if log_memory:
         log_ram(f"train_window {retrain_id} start")
@@ -413,9 +407,9 @@ def train_window(window_files, max_features, retrain_id, output_csv, metric_log=
     nu = compute_nu(ref_z_scores, method=nu_method)
 
     # ---------------------------------------------------------
-    # Store reference block data into the same metric log
+    # Store reference block data into the reference log
     # ---------------------------------------------------------
-    if metric_log is not None:
+    if reference_log is not None:
         for i, ref_file in enumerate(window_files):
             ref_df_block = DataUtils.concatenate_blocks([ref_file])
             ref_df_block = DataUtils.preprocess_labels(ref_df_block)
@@ -439,7 +433,6 @@ def train_window(window_files, max_features, retrain_id, output_csv, metric_log=
             )
 
             ref_metrics.update({
-                "block_index": i + 1,
                 "reference_block_pos": i + 1,
                 "file": ref_file,
                 "retrain_id": retrain_id,
@@ -458,7 +451,7 @@ def train_window(window_files, max_features, retrain_id, output_csv, metric_log=
                 **{f"lmt_{c}_score": v for c, v in drift_info_ref["per_class_scores"].items()},
                 "nu_method": nu_method,
             })
-            metric_log.append(ref_metrics)
+            reference_log.append(ref_metrics)
 
             del ref_df_block, X_ref_block, y_ref_block, ref_metrics, drift_info_ref
             cleanup_memory(f"Reference block logging retrain_id={retrain_id}, idx={i}")
@@ -503,15 +496,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Adaptive experiment with dummy drift (always retrain).")
     parser.add_argument("--data", type=str, default="../data/sequences", help="Base data directory")
     parser.add_argument("--start", type=str, default="2025-03-16", help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end", type=str, default="2025-03-25", help="End date (YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, default="2026-03-25", help="End date (YYYY-MM-DD)")
     parser.add_argument("--days", type=int, default=8, help="Window length in days (default=8)")
-    parser.add_argument("--out", type=str, default="../data/res/calibration/reference.csv", help="Output CSV path")
+    parser.add_argument("--out", type=str, default="../data/rq3/h8/output_anchor.csv", help="Output CSV path")
+
 
     # NEW
     parser.add_argument("--h", type=float, default=8.0, help="Sequential threshold h")
-    parser.add_argument("--nu_method", type=str, default="median", choices=["median", "mean", "q75"], help="Method to compute nu")
     parser.add_argument("--static", action="store_true", help="Run static calibration (no retraining)")
-
+    parser.add_argument(
+        "--nu_method",
+        type=str,
+        default="3sigma",
+        choices=["median", "mean", "q75", "1sigma", "2sigma", "3sigma"],
+        help="Method to compute nu"
+    )
     args = parser.parse_args()
 
     run_experiment_entropy_lmt(

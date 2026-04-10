@@ -344,7 +344,7 @@ def _gidx_score(probs, lam=0.75):
     return score, var_term, err_term
 '''
 
-def compute_gidx_reference(model, X_train, y_train, lam=0.8, k_mad=3.0):
+def compute_gidx_reference(model, X_train, y_train, lam=0.75, k_mad=3.0):
     probs = model.classifier.predict_proba(model.encode(X_train))
 
     # split into pseudo-blocks
@@ -367,9 +367,14 @@ def compute_gidx_reference(model, X_train, y_train, lam=0.8, k_mad=3.0):
     mad = 1.4826 * np.median(np.abs(scores - med))
     mad = max(mad, 1e-9)
 
+    mu = np.mean(scores)
+    sigma = np.std(scores)
+
     return {
         "median": float(med),
         "mad": float(mad),
+        "mu": float(mu),
+        "sigma": float(sigma),
         "lam": lam,
         "k_mad": k_mad
     }

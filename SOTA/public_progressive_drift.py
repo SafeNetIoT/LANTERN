@@ -39,12 +39,16 @@ warnings.filterwarnings("ignore")
 # =========================================================
 # Configuration
 # =========================================================
+'''
+#================
+# IDS
+#================
 DATA_DIR = "../data/public_datasets/CICIOT2023"
 OUT_DIR = "../data/public_datasets/res"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 FILES = {
-    "Benign": "BenignTraffic.pcap.csv",  #360000
+    "benign": "BenignTraffic.pcap.csv",  #360000
     #"SYN Flood": "DoS-SYN_Flood3.pcap.csv", #250000
     "HTTP Flood": "DDoS-HTTP_Flood.pcap.csv",  #28000
     "DNS_Spoofing": "DNS_Spoofing.pcap.csv",  #170000
@@ -57,7 +61,7 @@ FILES = {
 }
 
 CLASS_ORDER = [
-    "Benign",
+    "benign",
     #"SYN Flood",
     "HTTP Flood",
     #"DNS_Spoofing",
@@ -79,7 +83,130 @@ UNSEEN_TEST_SAMPLES = 400 #280
 SEEN_TEST_TOTAL = 1600  #1120
 
 METHODS = ["cade", "chen", "mateen", "gidx", "pe", "lmt"]
+'''
 
+# =========================================================
+# Configuration
+# =========================================================
+DATA_DIR = "../data/public_datasets/andriod_mal"
+OUT_DIR = "../data/public_datasets/res_android_mal"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# folder-based classes, not single files
+CLASS_ORDER = [
+    "benign",
+    "dowgin",
+    "fakeapp",
+    #"koler",
+    "simplelocker",
+    "plankton",
+    "svpeng",
+    "youmi",
+]
+
+MODEL_NAME = "cae"   # choices: "rf", "ae", "cae"
+RANDOM_STATE = 42
+
+# use all rows available in each folder, capped automatically by sample_dataframe
+PER_CLASS_TOTAL = 5000
+TRAIN_RATIO = 0.80
+
+UNSEEN_TEST_SAMPLES = 400
+SEEN_TEST_TOTAL = 1600
+
+METHODS = ["cade", "chen", "mateen", "gidx", "pe", "lmt"]
+
+# columns to drop before feature extraction
+DROP_COLS = [
+    "Flow ID",
+    "Source IP",
+    "Source Port",
+    "Destination IP",
+    "Destination Port",
+    "Protocol",
+    "Timestamp",
+    "Label",
+]
+
+
+# =========================================================
+# Data preparation for ids
+# =========================================================
+'''
+def load_and_prepare_data():
+    data_train = {}
+    data_test = {}
+
+    for i, cls in enumerate(CLASS_ORDER):
+        path = os.path.join(DATA_DIR, FILES[cls])
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Missing file: {path}")
+
+        df = safe_read_csv(path)
+        df = clean_dataframe(df)
+
+        sampled = sample_dataframe(df, PER_CLASS_TOTAL, RANDOM_STATE + i)
+        df_train, df_test = train_test_split_per_class(
+            sampled,
+            train_ratio=TRAIN_RATIO,
+            seed=RANDOM_STATE + i,
+        )
+
+        data_train[cls] = df_train
+        data_test[cls] = df_test
+
+    return data_train, data_test
+'''
+
+# =========================================================
+# Data preparation
+# =========================================================
+def load_and_prepare_data():
+    data_train = {}
+    data_test = {}
+
+    for i, cls in enumerate(CLASS_ORDER):
+        if cls == "benign":
+            class_dir = os.path.join(DATA_DIR, "benign")
+        else:
+            class_dir = os.path.join(DATA_DIR, cls)
+
+        if not os.path.isdir(class_dir):
+            raise FileNotFoundError(f"Missing folder: {class_dir}")
+
+        csv_files = sorted([
+            os.path.join(class_dir, f)
+            for f in os.listdir(class_dir)
+            if f.endswith(".csv")
+        ])
+        if len(csv_files) == 0:
+            raise FileNotFoundError(f"No CSV files found in: {class_dir}")
+
+        df_list = []
+        for fp in csv_files:
+            df = safe_read_csv(fp)
+            df = clean_dataframe(df)
+            df = df.loc[:, ~df.columns.duplicated()].copy()
+            drop_cols = [c for c in DROP_COLS if c in df.columns]
+            df = df.drop(columns=drop_cols)
+            df_list.append(df)
+
+        df_all = pd.concat(df_list, ignore_index=True)
+        df_all = clean_dataframe(df_all)
+
+        sampled = sample_dataframe(df_all, PER_CLASS_TOTAL, RANDOM_STATE + i)
+        df_train, df_test = train_test_split_per_class(
+            sampled,
+            train_ratio=TRAIN_RATIO,
+            seed=RANDOM_STATE + i,
+        )
+
+        data_train[cls] = df_train
+        data_test[cls] = df_test
+
+        print(f"[INFO] {cls}: total={len(df_all)}, train={len(df_train)}, test={len(df_test)}")
+
+    return data_train, data_test
 
 # =========================================================
 # General helpers
@@ -280,7 +407,7 @@ def compute_conditional_scores(
     cond_methods = ["cade", "chen", "mateen", "gidx", "pe", "lmt"]
 
     # benign
-    benign_mask = (y_test == "Benign")
+    benign_mask = (y_test == "benign")
     X_benign = X_test[benign_mask]
     y_benign = y_test[benign_mask]
 
@@ -288,7 +415,7 @@ def compute_conditional_scores(
         out[f"{method}_score_benign"] = _subset_score(method, X_benign, y_benign)
 
     # seen mean
-    seen_attack_classes = [c for c in seen_classes if c != "Benign"]
+    seen_attack_classes = [c for c in seen_classes if c != "benign"]
 
     for method in cond_methods:
         seen_scores = []
@@ -318,32 +445,6 @@ def compute_conditional_scores(
 
     return out
 
-# =========================================================
-# Data preparation
-# =========================================================
-def load_and_prepare_data():
-    data_train = {}
-    data_test = {}
-
-    for i, cls in enumerate(CLASS_ORDER):
-        path = os.path.join(DATA_DIR, FILES[cls])
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Missing file: {path}")
-
-        df = safe_read_csv(path)
-        df = clean_dataframe(df)
-
-        sampled = sample_dataframe(df, PER_CLASS_TOTAL, RANDOM_STATE + i)
-        df_train, df_test = train_test_split_per_class(
-            sampled,
-            train_ratio=TRAIN_RATIO,
-            seed=RANDOM_STATE + i,
-        )
-
-        data_train[cls] = df_train
-        data_test[cls] = df_test
-
-    return data_train, data_test
 
 
 # =========================================================
@@ -432,7 +533,7 @@ def main():
     print("[INFO] Loading and splitting data...")
     train_splits, test_splits = load_and_prepare_data()
 
-    feature_cols = infer_feature_columns(train_splits["Benign"])
+    feature_cols = infer_feature_columns(train_splits["benign"])
     print(f"[INFO] Number of numeric features: {len(feature_cols)}")
 
     model_cls = get_model_cls(MODEL_NAME)

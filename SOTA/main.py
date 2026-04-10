@@ -41,7 +41,7 @@ def run_static_experiment(
     window_days=8,
     blocks_per_day=24,
     max_features=2000,
-    drift_methods=None,
+    drift_methods=None
 ):
 
     N_BLOCKS = window_days * blocks_per_day
@@ -147,6 +147,12 @@ def run_static_experiment(
     if "gidx" in drift_methods:
         print("[GIDX] Building reference...")
         gidx_ref_stats = compute_gidx_reference(model_trainer, X_train, y_train)
+
+        ref_json_path = output_csv.replace(".csv", "_gidx_ref.json")
+        with open(ref_json_path, "w") as f:
+            json.dump(gidx_ref_stats, f, indent = 2)
+
+        print(f"[GIDX] Saved reference -> {ref_json_path}")
         
 
     # =========================================================
@@ -214,6 +220,7 @@ def run_static_experiment(
             metrics["drift_gidx_detected"] = drift
             metrics["drift_gidx_score"] = score
             
+            
         # -----------------------------------------------------
         # KL & Mateen via unified interface
         # -----------------------------------------------------
@@ -254,6 +261,13 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="cae")
     parser.add_argument("--out", type=str, default="../data/res/static.csv")
     parser.add_argument("--drift_methods", type=str, default="cade")
+    parser.add_argument(
+        "--nu_method",
+        type=str,
+        default="3sigma",
+        choices=["median", "mean", "q75", "1sigma", "2sigma", "3sigma"],
+        help="Method to compute nu"
+    )
 
     args = parser.parse_args()
 
@@ -274,4 +288,5 @@ if __name__ == "__main__":
         end_date=args.end,
         window_days=args.days,
         drift_methods=drift_methods,
+        nu_method=args.nu_method,
     )

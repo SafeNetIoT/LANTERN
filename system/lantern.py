@@ -33,7 +33,7 @@ except ImportError:
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"     # keep logical order
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"           # GPU #1
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"           # GPU #1
 
 
 # =========================================================
@@ -497,7 +497,7 @@ if __name__ == "__main__":
     parser.add_argument("--data", type=str, default="../data/sequences", help="Base data directory")
     parser.add_argument("--start", type=str, default="2025-03-16", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, default="2026-03-25", help="End date (YYYY-MM-DD)")
-    parser.add_argument("--days", type=int, default=8, help="Window length in days (default=8)")
+    parser.add_argument("--days", type=int, default=16, help="Window length in days (default=8)")
     parser.add_argument("--out", type=str, default="../data/rq3/h8/output_anchor.csv", help="Output CSV path")
 
 

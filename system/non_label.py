@@ -79,6 +79,9 @@ def log_ram(tag):
     rss_gb = psutil.Process(os.getpid()).memory_info().rss / (1024 ** 3)
     print(f"[RAM] {tag}: RSS={rss_gb:.2f} GiB")
 
+def predict_block_labels(model_trainer, X_block):
+    return model_trainer.predict(X_block)
+
 # =========================================================
 # Main Experiment
 # =========================================================
@@ -94,6 +97,7 @@ def run_experiment_entropy_lmt(
     h_value=8.0,
     nu_method="3sigma",
     static_calibration=True,
+    use_predicted_labels_online=False,
 ):
     N_BLOCKS = window_days * blocks_per_day
     #metric_log = []
@@ -170,17 +174,28 @@ def run_experiment_entropy_lmt(
             continue
 
         X_block = encoder.transform(df_block)
-        y_block = df_block["category"].values
-        metrics, recon_errors = model_trainer.evaluate(X_block, y_block)
+
+        # true labels for evaluation only
+        y_block_true = df_block["category"].values
+        metrics, recon_errors = model_trainer.evaluate(X_block, y_block_true)
         if len(recon_errors) == 0:
             continue
-        
+
+        # online drift labels come from the model in label efficient mode        
+        if use_predicted_labels_online:
+            y_block_online = predict_block_labels(model_trainer, X_block)
+            pred_label_match_rate = float(np.mean(y_block_online == y_block_true))
+        else:
+            y_block_online = y_block_true
+            pred_label_match_rate = 1.0
+
+
         # --- Drift detection ---
         # --- New drift pipeline: conformal calibration + fused evidence + sequential accumulation ---
         drift_info = compute_block_drift_evidence(
             model_trainer=model_trainer,
             X_block=X_block,
-            y_block=y_block,
+            y_block=y_block_online,
             entropy_ref=entropy_ref,
             baseline_shapes=baseline_shapes,
             lmt_ref=lmt_ref,
@@ -189,14 +204,7 @@ def run_experiment_entropy_lmt(
             use_mad_lmt=True,
         )
 
-        '''
-        g_stat, decision_any = update_sequential_state(
-            prev_g=g_stat,
-            z_t=drift_info["z_evidence"],
-            nu=nu,
-            h=h,
-        )
-        '''
+
         g_prev = g_stat
         g_stat, decision_any = update_sequential_state(
             prev_g=g_stat,
@@ -220,6 +228,8 @@ def run_experiment_entropy_lmt(
             "file": seq_file,
             "retrain_id": retrain_id,
             "data_split": "test",
+            "label_mode": "predicted_online_true_retrain" if use_predicted_labels_online else "true_online_true_retrain",
+            "pred_label_match_rate": pred_label_match_rate,
             "entropy_score": drift_info["entropy_score"],
             "entropy_drift_ratio": drift_info["entropy_drift_ratio"],
             "lmt_mean_score": drift_info["lmt_mean_score"],
@@ -238,39 +248,6 @@ def run_experiment_entropy_lmt(
 
         
         # --- Adaptive retraining ---
-        '''
-        if decision_any:
-            retrain_id += 1
-            print(f"[Retrain {retrain_id}] Triggered at block {block_index}")
-            if entropy_dec:
-                print(f"  ↳ Entropy score = {entropy_score:.4f} (ratio={drift_ratio:.4f})")
-            if lmt_dec:
-                print(f"  ↳ LMT score = {mean_lmt_score:.4f} (ratio={lmt_sample_ratio:.4f})")
-
-            # rebuild Wref as the most recent N_BLOCKS ending at current block
-            window_files = deque(history_files, maxlen=N_BLOCKS)  # Start with recent history
-
-            print(f"[Retrain {retrain_id}] Rebuilt window covers latest {len(window_files)} blocks")
-            print(f"[Retrain {retrain_id}] First file: {window_files[0]}")
-            print(f"[Retrain {retrain_id}] Last file:  {window_files[-1]}")
-
-            #encoder, model_trainer, entropy_ref, baseline_shapes, lmt_ref = train_window(window_files, max_features, retrain_id, output_csv)
-            #free current block level objects before retraining
-            safe_delete(locals(), "df_block", "X_block", "y_block", "metrics", "recon_errors")
-            cleanup_memory(f"Before retrain {retrain_id}")
-
-            if psutil is not None:
-                log_ram(f"Before retrain {retrain_id}")
-            
-            encoder, model_trainer, entropy_ref, baseline_shapes, lmt_ref = train_window(
-                window_files, 
-                max_features, 
-                retrain_id, 
-                output_csv,
-                max_train_rows=3000000,
-                log_memory=True)
-        '''
-
         if decision_any and not static_calibration:
             retrain_id += 1
             print(f"[Retrain {retrain_id}] Triggered at block {block_index}")
@@ -285,7 +262,17 @@ def run_experiment_entropy_lmt(
             print(f"[Retrain {retrain_id}] First file: {window_files[0]}")
             print(f"[Retrain {retrain_id}] Last file:  {window_files[-1]}")
 
-            safe_delete(locals(), "df_block", "X_block", "y_block", "metrics", "recon_errors", "drift_info")
+            safe_delete(
+                locals(), 
+                "df_block", 
+                "X_block", 
+                "y_block_true",
+                "y_block_online", 
+                "metrics", 
+                "recon_errors", 
+                "drift_info",
+                 "pred_label_match_rate",
+                )
             cleanup_memory(f"Before retrain {retrain_id}")
 
             if psutil is not None:
@@ -322,8 +309,15 @@ def run_experiment_entropy_lmt(
                   f"Z_t={drift_info['z_evidence']:.6f}, "
                   f"G_t={g_stat:.6f}, nu={nu:.6f}, h={h:.6f}")
 
-        safe_delete(locals(), "df_block", "X_block", "y_block", "metrics", "recon_errors")
-        #del df_block, X_block, y_block, metrics, recon_errors
+        safe_delete(
+            locals(), 
+            "df_block", 
+            "X_block", 
+            "y_block_true", 
+            "y_block_online",
+            "metrics", 
+            "recon_errors",
+            "drift_info")
         cleanup_memory(f"End of block {block_index}")
         block_index += 1
 
@@ -497,12 +491,12 @@ if __name__ == "__main__":
     parser.add_argument("--data", type=str, default="../data/sequences", help="Base data directory")
     parser.add_argument("--start", type=str, default="2025-03-16", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, default="2026-03-25", help="End date (YYYY-MM-DD)")
-    parser.add_argument("--days", type=int, default=16, help="Window length in days (default=8)")
-    parser.add_argument("--out", type=str, default="../data/rq3/h8/output_anchor.csv", help="Output CSV path")
+    parser.add_argument("--days", type=int, default=8, help="Window length in days (default=8)")
+    parser.add_argument("--out", type=str, default="../data/rq3/nonlabelh6/output_anchor.csv", help="Output CSV path")
 
 
     # NEW
-    parser.add_argument("--h", type=float, default=8.0, help="Sequential threshold h")
+    parser.add_argument("--h", type=float, default=6.0, help="Sequential threshold h")
     parser.add_argument("--static", action="store_true", help="Run static calibration (no retraining)")
     parser.add_argument(
         "--nu_method",
@@ -510,6 +504,11 @@ if __name__ == "__main__":
         default="3sigma",
         choices=["median", "mean", "q75", "1sigma", "2sigma", "3sigma"],
         help="Method to compute nu"
+    )
+    parser.add_argument(
+        "--pred_labels_online",
+        action="store_true",
+        help="Use predicted labels for online drift scoring, while keeping true labels for retraining"
     )
     args = parser.parse_args()
 
@@ -523,4 +522,5 @@ if __name__ == "__main__":
         h_value=args.h,
         nu_method=args.nu_method,
         static_calibration=args.static,
+        use_predicted_labels_online=args.pred_labels_online,
     )

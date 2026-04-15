@@ -291,6 +291,11 @@ class ContrastiveModelTrainer:
         }
         return metrics, recon_error
     
+    def predict(self, X):
+        X = _to_dense_numpy(X)
+        Z = self.encode(X)
+        return self.classifier.predict(Z)
+    
 
 
 # ----------------------------------------------------------

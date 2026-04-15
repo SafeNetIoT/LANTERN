@@ -286,7 +286,7 @@ if __name__ == "__main__":
     parser.add_argument("--test_start", type=str, default="2025-04-15", help="Testing start date")
     parser.add_argument("--test_end", type=str, default="2025-06-15", help="Testing end date")
     parser.add_argument("--out_dir", type=str, default="../data/res/window_sensitivity", help="Output directory")
-    parser.add_argument("--days_list", type=str, default="2,4,8,16,30", help="Comma-separated window sizes")
+    parser.add_argument("--days_list", type=str, default="6,10,12,14,18,20", help="Comma-separated window sizes")
     parser.add_argument("--max_features", type=int, default=2000, help="TF-IDF max features")
     args = parser.parse_args()
 

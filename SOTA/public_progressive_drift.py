@@ -39,20 +39,21 @@ warnings.filterwarnings("ignore")
 # =========================================================
 # Configuration
 # =========================================================
-'''
+
 #================
 # IDS
 #================
+'''
 DATA_DIR = "../data/public_datasets/CICIOT2023"
-OUT_DIR = "../data/public_datasets/res"
+OUT_DIR = "../data/public_datasets/resiot"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 FILES = {
     "benign": "BenignTraffic.pcap.csv",  #360000
-    #"SYN Flood": "DoS-SYN_Flood3.pcap.csv", #250000
+    "SYN Flood": "DoS-SYN_Flood3.pcap.csv", #250000
     "HTTP Flood": "DDoS-HTTP_Flood.pcap.csv",  #28000
     "DNS_Spoofing": "DNS_Spoofing.pcap.csv",  #170000
-    #"Dictionary Brute Force": "DictionaryBruteForce.pcap.csv",  #13000
+    "Dictionary Brute Force": "DictionaryBruteForce.pcap.csv",  #13000
     "OS Scan": "Recon-OSScan.pcap.csv",  #98000
     "Command Injection":"CommandInjection.pcap.csv", #5400
     "BrowserHijacking": "BrowserHijacking.pcap.csv",  #5800
@@ -62,11 +63,11 @@ FILES = {
 
 CLASS_ORDER = [
     "benign",
-    #"SYN Flood",
     "HTTP Flood",
     #"DNS_Spoofing",
     #"Dictionary Brute Force",
     "OS Scan",
+    #"SYN Flood",
     "Command Injection",
     "BrowserHijacking",
     "SQL Injection",
@@ -88,6 +89,7 @@ METHODS = ["cade", "chen", "mateen", "gidx", "pe", "lmt"]
 # =========================================================
 # Configuration
 # =========================================================
+
 DATA_DIR = "../data/public_datasets/andriod_mal"
 OUT_DIR = "../data/public_datasets/res_android_mal"
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -208,6 +210,7 @@ def load_and_prepare_data():
 
     return data_train, data_test
 
+    
 # =========================================================
 # General helpers
 # =========================================================
@@ -313,6 +316,7 @@ def extract_recon_errors(model_trainer, X, y):
     _, recon_errors = model_trainer.evaluate(X, y)
     return np.asarray(recon_errors, dtype=float)
 
+
 def lmt_score_with_predicted_class(model_trainer, X_block, baseline_shapes):
     """
     LMT score for benchmark use.
@@ -344,6 +348,37 @@ def lmt_score_with_predicted_class(model_trainer, X_block, baseline_shapes):
 
     return float(np.mean(all_scores))
 
+'''
+def lmt_score_with_predicted_class(model_trainer, X_block, baseline_shapes):
+    # Standardised Cov
+    z = model_trainer.encode(X_block)
+    probs, preds = get_probs_and_preds(model_trainer, X_block)
+
+    preds = np.asarray(preds, dtype=object)
+
+    all_scores = []
+
+    for c, (mu, Sigma) in baseline_shapes.items():
+        mask = (preds == c)
+        Zc = z[mask]
+
+        if len(Zc) == 0:
+            continue
+
+        eps = 1e-6
+        Sigma_c_reg = Sigma + eps * np.eye(Sigma.shape[0])
+
+        inv_sigma = np.linalg.inv(Sigma_c_reg)
+        diffs = Zc - mu
+        d2 = np.sum(diffs @ inv_sigma * diffs, axis=1)
+
+        all_scores.extend(d2.tolist())
+
+    if len(all_scores) == 0:
+        return np.nan
+
+    return float(np.median(all_scores))
+'''
 
 def compute_conditional_scores(
     model_trainer,

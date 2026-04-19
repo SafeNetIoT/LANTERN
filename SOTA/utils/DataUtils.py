@@ -128,3 +128,115 @@ def get_test_blocks_after(base_dir: str, start_block_index: int) -> List[str]:
     if start_block_index >= len(all_files):
         return []
     return all_files[start_block_index:]
+
+
+# ============================================================
+# ============================================================
+# ============================================================
+# For the Kyoto Dataset Test
+# ============================================================
+import os
+import glob
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+# existing Kyoto feature definitions can stay the same
+FEATURE_NUMERIC = [
+    "duration",
+    "src_bytes",
+    "dst_bytes",
+    "count",
+    "same_srv_rate",
+    "serror_rate",
+    "srv_serror_rate",
+    "dst_host_count",
+    "dst_host_srv_count",
+    "dst_host_same_src_port_rate",
+    "dst_host_serror_rate",
+    "dst_host_srv_serror_rate",
+]
+
+FEATURE_CATEGORICAL = [
+    "service",
+    "flag",
+    "protocol",
+]
+
+
+def list_kyoto_daily_csv_files(base_dir: str, year: str = "2015") -> list[str]:
+    pattern = os.path.join(base_dir, year, "*", "*.csv")
+    return sorted(glob.glob(pattern))
+
+
+def get_kyoto_day_slice(file_list: list[str], start_idx: int, end_idx: int) -> list[str]:
+    return file_list[start_idx:end_idx]
+
+
+def load_kyoto_csv_day(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path, low_memory=False)
+
+    if "day" in df.columns:
+        df["day"] = pd.to_datetime(df["day"], errors="coerce")
+
+    return df
+
+
+def load_kyoto_csv_range(file_list: list[str], verbose: bool = True) -> pd.DataFrame:
+    dfs = []
+    total = len(file_list)
+
+    for i, fp in enumerate(file_list, start=1):
+        if verbose:
+            print(f"[LOAD-CSV] {i}/{total}: {fp}")
+        dfs.append(load_kyoto_csv_day(fp))
+
+    if len(dfs) == 0:
+        raise ValueError("No Kyoto CSV files were loaded.")
+
+    return pd.concat(dfs, ignore_index=True).reset_index(drop=True)
+
+from typing import Optional
+def take_random_contiguous_slice(
+        df: pd.DataFrame, 
+        n: int = 10000, 
+        seed: Optional[int] = None
+        ) -> pd.DataFrame:
+    if len(df) <= n:
+        return df.reset_index(drop=True)
+
+    rng = np.random.default_rng(seed)
+    start_idx = int(rng.integers(0, len(df) - n + 1))
+    return df.iloc[start_idx:start_idx + n].reset_index(drop=True)
+
+
+def build_kyoto_preprocessor() -> ColumnTransformer:
+    try:
+        return ColumnTransformer(
+            transformers=[
+                ("num", StandardScaler(), FEATURE_NUMERIC),
+                ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), FEATURE_CATEGORICAL),
+            ]
+        )
+    except TypeError:
+        return ColumnTransformer(
+            transformers=[
+                ("num", StandardScaler(), FEATURE_NUMERIC),
+                ("cat", OneHotEncoder(handle_unknown="ignore", sparse=False), FEATURE_CATEGORICAL),
+            ]
+        )
+
+
+def build_kyoto_xy(df: pd.DataFrame, preprocessor: ColumnTransformer):
+    X = preprocessor.transform(df).astype(np.float32)
+    y = df["group_label"].values.astype(object)
+    return X, y
+
+
+def print_kyoto_day_summary(df: pd.DataFrame, name: str = "dataset") -> None:
+    day_min = df["day"].min() if "day" in df.columns else None
+    day_max = df["day"].max() if "day" in df.columns else None
+    print(f"\n[{name}] shape = {df.shape}")
+    print(f"[{name}] day range = {day_min} -> {day_max}")
+    print(df["group_label"].value_counts(dropna=False))

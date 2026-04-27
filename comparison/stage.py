@@ -43,7 +43,6 @@ warnings.filterwarnings("ignore")
 #================
 # IDS
 #================
-'''
 DATA_DIR = "../data/public_datasets/CICIOT2023"
 OUT_DIR = "../data/public_datasets/resiot"
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -84,11 +83,12 @@ UNSEEN_TEST_SAMPLES = 400 #280
 SEEN_TEST_TOTAL = 1600  #1120
 
 METHODS = ["cade", "chen", "mateen", "gidx", "pe", "lmt"]
-'''
+
 
 # =========================================================
 # Configuration
 # =========================================================
+'''
 
 DATA_DIR = "../data/public_datasets/andriod_mal"
 OUT_DIR = "../data/public_datasets/res_android_mal"
@@ -129,12 +129,11 @@ DROP_COLS = [
     "Timestamp",
     "Label",
 ]
-
+'''
 
 # =========================================================
 # Data preparation for ids
 # =========================================================
-'''
 def load_and_prepare_data():
     data_train = {}
     data_test = {}
@@ -158,11 +157,12 @@ def load_and_prepare_data():
         data_test[cls] = df_test
 
     return data_train, data_test
-'''
+
 
 # =========================================================
 # Data preparation
 # =========================================================
+'''
 def load_and_prepare_data():
     data_train = {}
     data_test = {}
@@ -209,7 +209,7 @@ def load_and_prepare_data():
         print(f"[INFO] {cls}: total={len(df_all)}, train={len(df_train)}, test={len(df_test)}")
 
     return data_train, data_test
-
+'''
     
 # =========================================================
 # General helpers

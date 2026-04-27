@@ -20,6 +20,7 @@ from utils.DriftUtils import (
 )
 
 import gc
+import time
 
 try:
     import torch
@@ -33,7 +34,7 @@ except ImportError:
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"     # keep logical order
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"           # GPU #1
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"           # GPU #1
 
 
 # =========================================================
@@ -59,13 +60,17 @@ def save_json_safely(obj, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump(obj_safe, f, indent=4)
-    print(f"[SAVE] Entropy reference saved → {path}")
+    print(f"[SAVE] JSON saved → {path}")
 
 def safe_delete(local_vars, *names):
     for name in names:
         if name in local_vars:
             del local_vars[name]
 
+
+# =========================================================
+# Memory Helpers
+# =========================================================
 def cleanup_memory(tag=None):
     gc.collect()
     if torch is not None and torch.cuda.is_available():
@@ -79,14 +84,37 @@ def log_ram(tag):
     rss_gb = psutil.Process(os.getpid()).memory_info().rss / (1024 ** 3)
     print(f"[RAM] {tag}: RSS={rss_gb:.2f} GiB")
 
-def predict_block_labels(model_trainer, X_block):
-    return model_trainer.predict(X_block)
+def get_rss_gb():
+    if psutil is None:
+        return np.nan
+    return psutil.Process(os.getpid()).memory_info().rss / (1024 ** 3)
+
+def get_gpu_mem_allocated_gb():
+    if torch is None or not torch.cuda.is_available():
+        return np.nan
+    return torch.cuda.memory_allocated() / (1024 ** 3)
+
+def get_gpu_mem_reserved_gb():
+    if torch is None or not torch.cuda.is_available():
+        return np.nan
+    return torch.cuda.memory_reserved() / (1024 ** 3)
+
+def get_gpu_peak_mem_allocated_gb():
+    if torch is None or not torch.cuda.is_available():
+        return np.nan
+    return torch.cuda.max_memory_allocated() / (1024 ** 3)
+
+def reset_gpu_peak_stats():
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
 
 # =========================================================
 # Main Experiment
 # =========================================================
 
-def run_experiment_entropy_lmt(
+def run_experiment_lantern(
     data_dir,
     output_csv,
     start_date=None,
@@ -97,13 +125,18 @@ def run_experiment_entropy_lmt(
     h_value=8.0,
     nu_method="3sigma",
     static_calibration=True,
-    use_predicted_labels_online=False,
 ):
     N_BLOCKS = window_days * blocks_per_day
-    #metric_log = []
     reference_log = []
     test_log = []
     retrain_id = 0
+
+    # Memory record
+    block_times_sec = []
+    train_times_sec = []
+    train_peak_ram_gb = []
+    train_peak_gpu_gb = []
+    train_records = []
 
     # --- Chronological stream ---
     if start_date and end_date:
@@ -131,7 +164,11 @@ def run_experiment_entropy_lmt(
             raise RuntimeError("Not enough blocks to initialize window!")
 
     # --- Initial training, trainer and entropy references ---
-    # encoder, model_trainer, entropy_ref, baseline_shapes, lmt_ref = train_window(window_files, max_features, retrain_id, output_csv)
+    init_train_t0 = time.perf_counter()
+    init_ram_before = get_rss_gb()
+    reset_gpu_peak_stats()
+    peak_ram_this_train = init_ram_before
+    
     (encoder,
     model_trainer,
     entropy_ref,
@@ -147,10 +184,35 @@ def run_experiment_entropy_lmt(
     retrain_id,
     output_csv,
     reference_log = reference_log,
-    max_train_rows=3000000,
+    max_train_rows=300000000,
     log_memory=True,
     nu_method=nu_method,
     )
+
+    init_train_time_sec = time.perf_counter() - init_train_t0
+    peak_ram_this_train = max(peak_ram_this_train, get_rss_gb())
+    peak_gpu_this_train = get_gpu_peak_mem_allocated_gb()
+
+    train_times_sec.append(init_train_time_sec)
+    train_peak_ram_gb.append(peak_ram_this_train)
+    train_peak_gpu_gb.append(peak_gpu_this_train)
+    train_records.append({
+        "train_id": 0,
+        "train_stage": "initial",
+        "train_time_sec": init_train_time_sec,
+        "peak_ram_gb": peak_ram_this_train,
+        "peak_gpu_gb": peak_gpu_this_train,
+        "window_days": window_days,
+        "n_blocks": N_BLOCKS,
+    })
+
+    print(
+        f"[COST] Train initial | "
+        f"time={init_train_time_sec:.2f}s | "
+        f"peak_ram={peak_ram_this_train:.2f} GiB | "
+        f"peak_gpu={peak_gpu_this_train:.2f} GiB"
+    )
+
     block_index = N_BLOCKS + 1
     
     # sequential state
@@ -158,12 +220,12 @@ def run_experiment_entropy_lmt(
     h = float(h_value)
     print(f"[SEQ] h = {h:.3f}")
     print(f"[SEQ] nu = {nu:.6f}")
-    # --- Initialize memory for temporal consistency ---
-    # recent_lmt_decisions = deque(maxlen=10)
+    
 
 
     # --- Process stream ---
     for seq_file in tqdm(file_stream, desc="Evaluating"):
+        block_t0 = time.perf_counter()
         #always update chronological history
         history_files.append(seq_file)
 
@@ -174,28 +236,17 @@ def run_experiment_entropy_lmt(
             continue
 
         X_block = encoder.transform(df_block)
-
-        # true labels for evaluation only
-        y_block_true = df_block["category"].values
-        metrics, recon_errors = model_trainer.evaluate(X_block, y_block_true)
+        y_block = df_block["category"].values
+        metrics, recon_errors = model_trainer.evaluate(X_block, y_block)
         if len(recon_errors) == 0:
             continue
-
-        # online drift labels come from the model in label efficient mode        
-        if use_predicted_labels_online:
-            y_block_online = predict_block_labels(model_trainer, X_block)
-            pred_label_match_rate = float(np.mean(y_block_online == y_block_true))
-        else:
-            y_block_online = y_block_true
-            pred_label_match_rate = 1.0
-
-
+        
         # --- Drift detection ---
         # --- New drift pipeline: conformal calibration + fused evidence + sequential accumulation ---
         drift_info = compute_block_drift_evidence(
             model_trainer=model_trainer,
             X_block=X_block,
-            y_block=y_block_online,
+            y_block=y_block,
             entropy_ref=entropy_ref,
             baseline_shapes=baseline_shapes,
             lmt_ref=lmt_ref,
@@ -222,14 +273,15 @@ def run_experiment_entropy_lmt(
             f"h={h:.6f} | "
             f"trigger={int(decision_any)}"
         )
+        
+        block_time_sec = time.perf_counter() - block_t0
+        block_times_sec.append(block_time_sec)
 
         metrics.update({
             "block_index": block_index,
             "file": seq_file,
             "retrain_id": retrain_id,
             "data_split": "test",
-            "label_mode": "predicted_online_true_retrain" if use_predicted_labels_online else "true_online_true_retrain",
-            "pred_label_match_rate": pred_label_match_rate,
             "entropy_score": drift_info["entropy_score"],
             "entropy_drift_ratio": drift_info["entropy_drift_ratio"],
             "lmt_mean_score": drift_info["lmt_mean_score"],
@@ -243,6 +295,7 @@ def run_experiment_entropy_lmt(
             "trigger_decision": int(decision_any),
             **{f"lmt_{c}_score": v for c, v in drift_info["per_class_scores"].items()},
             "nu_method": nu_method,
+            "block_time_sec": block_time_sec,
         })
         test_log.append(metrics)
 
@@ -262,21 +315,17 @@ def run_experiment_entropy_lmt(
             print(f"[Retrain {retrain_id}] First file: {window_files[0]}")
             print(f"[Retrain {retrain_id}] Last file:  {window_files[-1]}")
 
-            safe_delete(
-                locals(), 
-                "df_block", 
-                "X_block", 
-                "y_block_true",
-                "y_block_online", 
-                "metrics", 
-                "recon_errors", 
-                "drift_info",
-                 "pred_label_match_rate",
-                )
+            safe_delete(locals(), "df_block", "X_block", "y_block", "metrics", "recon_errors", "drift_info")
             cleanup_memory(f"Before retrain {retrain_id}")
 
             if psutil is not None:
                 log_ram(f"Before retrain {retrain_id}")
+
+            update_train_t0 = time.perf_counter()
+            update_ram_before = get_rss_gb()
+            reset_gpu_peak_stats()
+
+            peak_ram_this_train = update_ram_before
 
             (
                 encoder,
@@ -294,13 +343,38 @@ def run_experiment_entropy_lmt(
                 retrain_id,
                 output_csv,
                 reference_log = reference_log,
-                max_train_rows=3000000,
+                max_train_rows=300000000,
                 log_memory=True,
                 nu_method=nu_method,
             )
 
+            update_train_time_sec = time.perf_counter() - update_train_t0
+            peak_ram_this_train = max(peak_ram_this_train, get_rss_gb())
+            peak_gpu_this_train = get_gpu_peak_mem_allocated_gb()
+
+            train_times_sec.append(update_train_time_sec)
+            train_peak_ram_gb.append(peak_ram_this_train)
+            train_peak_gpu_gb.append(peak_gpu_this_train)
+            train_records.append({
+                "train_id": retrain_id,
+                "train_stage": "update",
+                "train_time_sec": update_train_time_sec,
+                "peak_ram_gb": peak_ram_this_train,
+                "peak_gpu_gb": peak_gpu_this_train,
+                "window_days": window_days,
+                "n_blocks": N_BLOCKS,
+            })
+
+            print(
+                f"[COST] Train update {retrain_id} | "
+                f"time={update_train_time_sec:.2f}s | "
+                f"peak_ram={peak_ram_this_train:.2f} GiB | "
+                f"peak_gpu={peak_gpu_this_train:.2f} GiB"
+            )
+
             # reset sequential statistic after update
             g_stat = 0.0
+
 
         if decision_any and static_calibration:
             print(f"[STATIC TRIGGER] block {block_index} | "
@@ -309,20 +383,13 @@ def run_experiment_entropy_lmt(
                   f"Z_t={drift_info['z_evidence']:.6f}, "
                   f"G_t={g_stat:.6f}, nu={nu:.6f}, h={h:.6f}")
 
-        safe_delete(
-            locals(), 
-            "df_block", 
-            "X_block", 
-            "y_block_true", 
-            "y_block_online",
-            "metrics", 
-            "recon_errors",
-            "drift_info")
+        safe_delete(locals(), "df_block", "X_block", "y_block", "metrics", "recon_errors")
+        #del df_block, X_block, y_block, metrics, recon_errors
         cleanup_memory(f"End of block {block_index}")
         block_index += 1
 
     # --- Save metrics seperately ---
-    out_dir = os.path.dirname(output_csv)
+    out_dir = os.path.dirname(output_csv) or "."
     os.makedirs(out_dir, exist_ok=True)
 
     reference_csv = os.path.join(out_dir, "reference_blocks.csv")
@@ -336,6 +403,35 @@ def run_experiment_entropy_lmt(
 
     print(f"Reference metrics saved → {reference_csv}")
     print(f"Test metrics saved → {test_csv}")
+
+    initial_train_times = [r["train_time_sec"] for r in train_records if r["train_stage"] == "initial"]
+    update_train_times = [r["train_time_sec"] for r in train_records if r["train_stage"] == "update"]
+
+    cost_summary = {
+        "window_days": int(window_days),
+        "n_test_blocks": int(len(test_df)),
+        "avg_block_time_sec": float(np.mean(block_times_sec)) if block_times_sec else None,
+        "median_block_time_sec": float(np.median(block_times_sec)) if block_times_sec else None,
+        "p95_block_time_sec": float(np.quantile(block_times_sec, 0.95)) if block_times_sec else None,
+        "n_total_trains": int(len(train_records)),
+        "n_update_trains": int(len(update_train_times)),
+        "initial_train_time_sec": float(initial_train_times[0]) if initial_train_times else None,
+        "avg_update_train_time_sec": float(np.mean(update_train_times)) if update_train_times else None,
+        "total_train_time_sec": float(np.sum(train_times_sec)) if train_times_sec else 0.0,
+        "peak_ram_gb_during_train": float(np.max(train_peak_ram_gb)) if train_peak_ram_gb else None,
+        "peak_gpu_gb_during_train": float(np.max(train_peak_gpu_gb)) if train_peak_gpu_gb else None,
+    }
+
+    cost_json = os.path.join(out_dir, "cost_summary.json")
+    save_json_safely(cost_summary, cost_json)
+    
+    print("\n=== COST SUMMARY ===")
+    train_cost_csv = os.path.join(out_dir, "train_cost_records.csv")
+    pd.DataFrame(train_records).to_csv(train_cost_csv, index=False)
+    print(f"Training cost records saved → {train_cost_csv}")
+
+    for k, v in cost_summary.items():
+        print(f"{k}: {v}")
 
     return reference_df, test_df
 
@@ -492,11 +588,10 @@ if __name__ == "__main__":
     parser.add_argument("--start", type=str, default="2025-03-16", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, default="2026-03-25", help="End date (YYYY-MM-DD)")
     parser.add_argument("--days", type=int, default=8, help="Window length in days (default=8)")
-    parser.add_argument("--out", type=str, default="../data/rq3/nonlabelh6/output_anchor.csv", help="Output CSV path")
+    parser.add_argument("--out", type=str, default="../data/res/rq3/h8/output_anchor.csv", help="Output CSV path")
 
 
-    # NEW
-    parser.add_argument("--h", type=float, default=6.0, help="Sequential threshold h")
+    parser.add_argument("--h", type=float, default=8.0, help="Sequential threshold h")
     parser.add_argument("--static", action="store_true", help="Run static calibration (no retraining)")
     parser.add_argument(
         "--nu_method",
@@ -505,14 +600,9 @@ if __name__ == "__main__":
         choices=["median", "mean", "q75", "1sigma", "2sigma", "3sigma"],
         help="Method to compute nu"
     )
-    parser.add_argument(
-        "--pred_labels_online",
-        action="store_true",
-        help="Use predicted labels for online drift scoring, while keeping true labels for retraining"
-    )
     args = parser.parse_args()
 
-    run_experiment_entropy_lmt(
+    run_experiment_lantern(
         data_dir=args.data,
         output_csv=args.out,
         start_date=args.start,
@@ -522,5 +612,4 @@ if __name__ == "__main__":
         h_value=args.h,
         nu_method=args.nu_method,
         static_calibration=args.static,
-        use_predicted_labels_online=args.pred_labels_online,
     )

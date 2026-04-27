@@ -9,107 +9,6 @@ from sklearn.covariance import LedoitWolf
 
 
 # =========================================================
-# KL Divergence Drift Test
-# =========================================================
-def _kl_divergence(p, q, eps=1e-8):
-    p = np.asarray(p, float) + eps
-    q = np.asarray(q, float) + eps
-    p /= p.sum()
-    q /= q.sum()
-    return float(np.sum(rel_entr(p, q)))
-
-
-def kl_drift_test(ref_errors, test_errors, bins=50, k_mad=3.0):
-    ref_hist, bin_edges = np.histogram(ref_errors, bins=bins, density=True)
-    test_hist, _ = np.histogram(test_errors, bins=bin_edges, density=True)
-
-    kl_value = _kl_divergence(test_hist, ref_hist)
-
-    kl_ref_vals = []
-    for _ in range(10):
-        idx = np.random.choice(len(ref_errors), size=len(test_errors), replace=False)
-        sub = ref_errors[idx]
-        h, _ = np.histogram(sub, bins=bin_edges, density=True)
-        kl_ref_vals.append(_kl_divergence(h, ref_hist))
-
-    kl_ref_vals = np.asarray(kl_ref_vals)
-    med = np.median(kl_ref_vals)
-    mad = 1.4826 * np.median(np.abs(kl_ref_vals - med))
-    mad = max(mad, 1e-9)
-
-    thr = med + k_mad * mad
-    return kl_value > thr, kl_value
-
-
-# =========================================================
-# Mateen Drift Test (KS Test)
-# =========================================================
-def mateen_ks_test(ref_errors, test_errors, alpha=0.05):
-    stat, p = ks_2samp(ref_errors, test_errors)
-    return (p < alpha), float(p)
-
-
-# =========================================================
-# OWAD Calibrator
-# =========================================================
-def _owad_fit_calibrator(control_scores, is_mal_conf=True):
-    x = np.asarray(control_scores, float)
-    xs = np.sort(x)
-    ranks = np.arange(len(xs), dtype=float) / max(len(xs), 1)
-
-    iso = IsotonicRegression(
-        y_min=0.0, y_max=1.0,
-        increasing=True, out_of_bounds="clip"
-    )
-    iso.fit(xs, ranks)
-
-    def calib(v):
-        p = iso.predict(np.asarray(v, float))
-        return 1.0 - p if is_mal_conf else p
-
-    return calib
-
-
-# =========================================================
-# OWAD Permutation G Test
-# =========================================================
-def _owad_gtest(p_ctrl, p_test, bins=5):
-    h_ctrl, _ = np.histogram(p_ctrl, bins=bins, range=(0, 1))
-    h_test, _ = np.histogram(p_test, bins=bins, range=(0, 1))
-
-    eps = 1e-10
-    E = h_ctrl / max(h_ctrl.sum(), 1)
-    E = E * h_test.sum()
-
-    O = h_test.astype(float) + eps
-    E = E.astype(float) + eps
-
-    return float(np.sum(O * (np.log(O) - np.log(E))))
-
-
-def owad_run(control_scores, test_scores, bins=5, rounds=100, alpha=0.05):
-    calib = _owad_fit_calibrator(control_scores)
-    p_ctrl = calib(control_scores)
-    p_test = calib(test_scores)
-
-    s_obs = _owad_gtest(p_ctrl, p_test, bins=bins)
-
-    z = np.concatenate([p_ctrl, p_test])
-    n = len(p_test)
-    cnt = 0
-    rng = np.random.default_rng(42)
-
-    for _ in range(rounds):
-        rng.shuffle(z)
-        zx, zy = z[:n], z[n:]
-        if _owad_gtest(zy, zx, bins=bins) >= s_obs:
-            cnt += 1
-
-    pval = (cnt + 1) / (rounds + 1)
-    return pval < alpha, float(pval)
-
-
-# =========================================================
 # Chen Pseudo-Loss Drift Detection
 # =========================================================
 def _chen_ce_loss(probs):
@@ -326,24 +225,6 @@ def _gidx_score(probs, y_true, lam=0.8):
     return score, var_term, err_term
 
 
-'''
-def _gidx_score(probs, lam=0.75):
-    probs = np.asarray(probs, dtype=float)
-    probs = np.clip(probs, 1e-12, 1.0)
-    probs = probs / probs.sum(axis=1, keepdims=True)
-
-    conf = np.max(probs, axis=1)
-
-    # instability across samples
-    var_term = float(np.var(conf))
-
-    # average uncertainty surrogate
-    err_term = float(1.0 - np.mean(conf))
-
-    score = lam * var_term + (1.0 - lam) * err_term
-    return score, var_term, err_term
-'''
-
 def compute_gidx_reference(model, X_train, y_train, lam=0.75, k_mad=3.0):
     probs = model.classifier.predict_proba(model.encode(X_train))
 
@@ -523,6 +404,114 @@ def lmt_fast_detect(
     score = float(np.mean(all_scores))
     thr = lmt_ref["median"] + k_mad * lmt_ref["mad"]
     return score > thr, score
+
+
+
+
+
+
+
+
+## ⬇ Normal shift methods (not used)
+# =========================================================
+# KL Divergence Drift Test
+# =========================================================
+def _kl_divergence(p, q, eps=1e-8):
+    p = np.asarray(p, float) + eps
+    q = np.asarray(q, float) + eps
+    p /= p.sum()
+    q /= q.sum()
+    return float(np.sum(rel_entr(p, q)))
+
+
+def kl_drift_test(ref_errors, test_errors, bins=50, k_mad=3.0):
+    ref_hist, bin_edges = np.histogram(ref_errors, bins=bins, density=True)
+    test_hist, _ = np.histogram(test_errors, bins=bin_edges, density=True)
+
+    kl_value = _kl_divergence(test_hist, ref_hist)
+
+    kl_ref_vals = []
+    for _ in range(10):
+        idx = np.random.choice(len(ref_errors), size=len(test_errors), replace=False)
+        sub = ref_errors[idx]
+        h, _ = np.histogram(sub, bins=bin_edges, density=True)
+        kl_ref_vals.append(_kl_divergence(h, ref_hist))
+
+    kl_ref_vals = np.asarray(kl_ref_vals)
+    med = np.median(kl_ref_vals)
+    mad = 1.4826 * np.median(np.abs(kl_ref_vals - med))
+    mad = max(mad, 1e-9)
+
+    thr = med + k_mad * mad
+    return kl_value > thr, kl_value
+
+
+# =========================================================
+# Mateen Drift Test (KS Test)
+# =========================================================
+def mateen_ks_test(ref_errors, test_errors, alpha=0.05):
+    stat, p = ks_2samp(ref_errors, test_errors)
+    return (p < alpha), float(p)
+
+
+# =========================================================
+# OWAD Calibrator
+# =========================================================
+def _owad_fit_calibrator(control_scores, is_mal_conf=True):
+    x = np.asarray(control_scores, float)
+    xs = np.sort(x)
+    ranks = np.arange(len(xs), dtype=float) / max(len(xs), 1)
+
+    iso = IsotonicRegression(
+        y_min=0.0, y_max=1.0,
+        increasing=True, out_of_bounds="clip"
+    )
+    iso.fit(xs, ranks)
+
+    def calib(v):
+        p = iso.predict(np.asarray(v, float))
+        return 1.0 - p if is_mal_conf else p
+
+    return calib
+
+
+# =========================================================
+# OWAD Permutation G Test
+# =========================================================
+def _owad_gtest(p_ctrl, p_test, bins=5):
+    h_ctrl, _ = np.histogram(p_ctrl, bins=bins, range=(0, 1))
+    h_test, _ = np.histogram(p_test, bins=bins, range=(0, 1))
+
+    eps = 1e-10
+    E = h_ctrl / max(h_ctrl.sum(), 1)
+    E = E * h_test.sum()
+
+    O = h_test.astype(float) + eps
+    E = E.astype(float) + eps
+
+    return float(np.sum(O * (np.log(O) - np.log(E))))
+
+
+def owad_run(control_scores, test_scores, bins=5, rounds=100, alpha=0.05):
+    calib = _owad_fit_calibrator(control_scores)
+    p_ctrl = calib(control_scores)
+    p_test = calib(test_scores)
+
+    s_obs = _owad_gtest(p_ctrl, p_test, bins=bins)
+
+    z = np.concatenate([p_ctrl, p_test])
+    n = len(p_test)
+    cnt = 0
+    rng = np.random.default_rng(42)
+
+    for _ in range(rounds):
+        rng.shuffle(z)
+        zx, zy = z[:n], z[n:]
+        if _owad_gtest(zy, zx, bins=bins) >= s_obs:
+            cnt += 1
+
+    pval = (cnt + 1) / (rounds + 1)
+    return pval < alpha, float(pval)
 
 # =========================================================
 # Unified Drift Detection Wrapper

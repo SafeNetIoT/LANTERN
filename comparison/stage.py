@@ -5,6 +5,8 @@ import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import argparse
+from typing import Optional
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, f1_score
@@ -39,107 +41,136 @@ warnings.filterwarnings("ignore")
 # =========================================================
 # Configuration
 # =========================================================
+from dataclasses import dataclass
 
-#================
-# IDS
-#================
-DATA_DIR = "../data/public_datasets/CICIOT2023"
-OUT_DIR = "../data/public_datasets/resiot"
+
+@dataclass
+class ExperimentConfig:
+    dataset: str
+    data_dir: str
+    out_dir: str
+    class_order: list
+    files: Optional[dict]
+    drop_cols: Optional[list]
+    model_name: str = "cae"
+    random_state: int = 42
+    per_class_total: int = 5000
+    train_ratio: float = 0.80
+    unseen_test_samples: int = 400
+    seen_test_total: int = 1600
+    methods: tuple = ("cade", "chen", "mateen", "gidx", "pe", "lmt")
+
+
+def get_config(dataset: str = "ciciot2023") -> ExperimentConfig:
+    if dataset == "ciciot2023":
+        return ExperimentConfig(
+            dataset="ciciot2023",
+            data_dir="../data/public_datasets/CICIOT2023",
+            out_dir="../data/public_datasets/resiot",
+            files={
+                "benign": "BenignTraffic.pcap.csv",
+                "SYN Flood": "DoS-SYN_Flood3.pcap.csv",
+                "HTTP Flood": "DDoS-HTTP_Flood.pcap.csv",
+                "DNS_Spoofing": "DNS_Spoofing.pcap.csv",
+                "Dictionary Brute Force": "DictionaryBruteForce.pcap.csv",
+                "OS Scan": "Recon-OSScan.pcap.csv",
+                "Command Injection": "CommandInjection.pcap.csv",
+                "BrowserHijacking": "BrowserHijacking.pcap.csv",
+                "SQL Injection": "SqlInjection.pcap.csv",
+                "XSS": "XSS.pcap.csv",
+            },
+            class_order=[
+                "benign",
+                "HTTP Flood",
+                "OS Scan",
+                "Command Injection",
+                "BrowserHijacking",
+                "SQL Injection",
+                "XSS",
+            ],
+            drop_cols=None,
+        )
+
+    if dataset == "android":
+        return ExperimentConfig(
+            dataset="android",
+            data_dir="../data/public_datasets/andriod_mal",
+            out_dir="../data/public_datasets/res_android_mal",
+            files=None,
+            class_order=[
+                "benign",
+                "dowgin",
+                "fakeapp",
+                "simplelocker",
+                "plankton",
+                "svpeng",
+                "youmi",
+            ],
+            drop_cols=[
+                "Flow ID",
+                "Source IP",
+                "Source Port",
+                "Destination IP",
+                "Destination Port",
+                "Protocol",
+                "Timestamp",
+                "Label",
+            ],
+        )
+
+    raise ValueError(f"Unknown dataset: {dataset}")
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="ciciot2023",
+        choices=["ciciot2023", "android"],
+        help="Dataset to run: ciciot2023 or android",
+    )
+    return parser.parse_args()
+
+
+ARGS = parse_args()
+CFG = get_config(ARGS.dataset)
+
+DATA_DIR = CFG.data_dir
+OUT_DIR = CFG.out_dir
+FILES = CFG.files
+CLASS_ORDER = CFG.class_order
+DROP_COLS = CFG.drop_cols
+
+MODEL_NAME = CFG.model_name
+RANDOM_STATE = CFG.random_state
+PER_CLASS_TOTAL = CFG.per_class_total
+TRAIN_RATIO = CFG.train_ratio
+UNSEEN_TEST_SAMPLES = CFG.unseen_test_samples
+SEEN_TEST_TOTAL = CFG.seen_test_total
+METHODS = list(CFG.methods)
+
 os.makedirs(OUT_DIR, exist_ok=True)
-
-FILES = {
-    "benign": "BenignTraffic.pcap.csv",  #360000
-    "SYN Flood": "DoS-SYN_Flood3.pcap.csv", #250000
-    "HTTP Flood": "DDoS-HTTP_Flood.pcap.csv",  #28000
-    "DNS_Spoofing": "DNS_Spoofing.pcap.csv",  #170000
-    "Dictionary Brute Force": "DictionaryBruteForce.pcap.csv",  #13000
-    "OS Scan": "Recon-OSScan.pcap.csv",  #98000
-    "Command Injection":"CommandInjection.pcap.csv", #5400
-    "BrowserHijacking": "BrowserHijacking.pcap.csv",  #5800
-    "SQL Injection": "SqlInjection.pcap.csv", #5200
-    "XSS": "XSS.pcap.csv", #3800
-}
-
-CLASS_ORDER = [
-    "benign",
-    "HTTP Flood",
-    #"DNS_Spoofing",
-    #"Dictionary Brute Force",
-    "OS Scan",
-    #"SYN Flood",
-    "Command Injection",
-    "BrowserHijacking",
-    "SQL Injection",
-    "XSS",
-]
-
-MODEL_NAME = "cae"   # choices: "rf", "ae", "cae"
-RANDOM_STATE = 42
-
-PER_CLASS_TOTAL = 5000 #3500
-TRAIN_RATIO = 0.80
-
-UNSEEN_TEST_SAMPLES = 400 #280
-SEEN_TEST_TOTAL = 1600  #1120
-
-METHODS = ["cade", "chen", "mateen", "gidx", "pe", "lmt"]
-
-
+    
 # =========================================================
-# Configuration
-# =========================================================
-'''
-
-DATA_DIR = "../data/public_datasets/andriod_mal"
-OUT_DIR = "../data/public_datasets/res_android_mal"
-os.makedirs(OUT_DIR, exist_ok=True)
-
-# folder-based classes, not single files
-CLASS_ORDER = [
-    "benign",
-    "dowgin",
-    "fakeapp",
-    #"koler",
-    "simplelocker",
-    "plankton",
-    "svpeng",
-    "youmi",
-]
-
-MODEL_NAME = "cae"   # choices: "rf", "ae", "cae"
-RANDOM_STATE = 42
-
-# use all rows available in each folder, capped automatically by sample_dataframe
-PER_CLASS_TOTAL = 5000
-TRAIN_RATIO = 0.80
-
-UNSEEN_TEST_SAMPLES = 400
-SEEN_TEST_TOTAL = 1600
-
-METHODS = ["cade", "chen", "mateen", "gidx", "pe", "lmt"]
-
-# columns to drop before feature extraction
-DROP_COLS = [
-    "Flow ID",
-    "Source IP",
-    "Source Port",
-    "Destination IP",
-    "Destination Port",
-    "Protocol",
-    "Timestamp",
-    "Label",
-]
-'''
-
-# =========================================================
-# Data preparation for ids
+# General helpers
 # =========================================================
 def load_and_prepare_data():
+    if CFG.dataset == "ciciot2023":
+        return load_flat_file_dataset()
+
+    if CFG.dataset == "android":
+        return load_folder_dataset()
+
+    raise ValueError(f"Unsupported dataset: {CFG.dataset}")
+
+
+def load_flat_file_dataset():
     data_train = {}
     data_test = {}
 
     for i, cls in enumerate(CLASS_ORDER):
         path = os.path.join(DATA_DIR, FILES[cls])
+
         if not os.path.exists(path):
             raise FileNotFoundError(f"Missing file: {path}")
 
@@ -156,41 +187,40 @@ def load_and_prepare_data():
         data_train[cls] = df_train
         data_test[cls] = df_test
 
+        print(f"[INFO] {cls}: train={len(df_train)}, test={len(df_test)}")
+
     return data_train, data_test
 
 
-# =========================================================
-# Data preparation
-# =========================================================
-'''
-def load_and_prepare_data():
+def load_folder_dataset():
     data_train = {}
     data_test = {}
 
     for i, cls in enumerate(CLASS_ORDER):
-        if cls == "benign":
-            class_dir = os.path.join(DATA_DIR, "benign")
-        else:
-            class_dir = os.path.join(DATA_DIR, cls)
+        class_dir = os.path.join(DATA_DIR, cls)
 
         if not os.path.isdir(class_dir):
             raise FileNotFoundError(f"Missing folder: {class_dir}")
 
-        csv_files = sorted([
+        csv_files = sorted(
             os.path.join(class_dir, f)
             for f in os.listdir(class_dir)
             if f.endswith(".csv")
-        ])
+        )
+
         if len(csv_files) == 0:
             raise FileNotFoundError(f"No CSV files found in: {class_dir}")
 
         df_list = []
+
         for fp in csv_files:
             df = safe_read_csv(fp)
             df = clean_dataframe(df)
             df = df.loc[:, ~df.columns.duplicated()].copy()
+
             drop_cols = [c for c in DROP_COLS if c in df.columns]
             df = df.drop(columns=drop_cols)
+
             df_list.append(df)
 
         df_all = pd.concat(df_list, ignore_index=True)
@@ -209,11 +239,9 @@ def load_and_prepare_data():
         print(f"[INFO] {cls}: total={len(df_all)}, train={len(df_train)}, test={len(df_test)}")
 
     return data_train, data_test
-'''
-    
-# =========================================================
-# General helpers
-# =========================================================
+
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -482,82 +510,6 @@ def compute_conditional_scores(
 
 
 
-# =========================================================
-# Plotting
-# =========================================================
-def plot_drift_scores(df_results, out_path):
-    plt.figure(figsize=(11, 6))
-    x = np.arange(len(df_results))
-
-    for method in METHODS:
-        norm_col = f"{method}_score_norm"
-        if norm_col in df_results.columns:
-            plt.plot(
-                x,
-                df_results[norm_col],
-                marker="o",
-                linewidth=2,
-                label=method.upper(),
-            )
-
-    plt.xticks(x, df_results["probe_class"], rotation=20, ha="right")
-    plt.xlabel("Unseen attack class")
-    plt.ylabel("Normalized drift score")
-    plt.title("Progressive unseen attack probing")
-    plt.grid(alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=300)
-    plt.close()
-
-
-def plot_performance(df_results, out_path):
-    plt.figure(figsize=(11, 5))
-    x = np.arange(len(df_results))
-
-    plt.plot(x, df_results["accuracy"], marker="o", linewidth=2, label="Accuracy")
-    plt.plot(x, df_results["f1_macro"], marker="o", linewidth=2, label="Macro F1")
-
-    plt.xticks(x, df_results["probe_class"], rotation=20, ha="right")
-    plt.xlabel("Unseen attack class")
-    plt.ylabel("Performance")
-    plt.title("Performance on mixed seen and unseen test set")
-    plt.grid(alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=300)
-    plt.close()
-
-
-def plot_conditional_scores(df_results, methods, out_dir):
-    x = np.arange(len(df_results))
-    stage_labels = df_results["probe_class"].tolist()
-
-    for method in methods:
-        benign_col = f"{method}_score_benign"
-        seen_col = f"{method}_score_seen_mean"
-        unseen_col = f"{method}_score_unseen"
-
-        if benign_col not in df_results.columns:
-            continue
-
-        plt.figure(figsize=(10, 5))
-        plt.plot(x, df_results[benign_col], marker="o", linewidth=2, label="Benign")
-        plt.plot(x, df_results[seen_col], marker="o", linewidth=2, label="Seen classes mean")
-        plt.plot(x, df_results[unseen_col], marker="o", linewidth=2, label="Unseen class")
-
-        plt.xticks(x, stage_labels, rotation=20, ha="right")
-        plt.xlabel("Unseen attack class")
-        plt.ylabel("Raw drift score")
-        plt.title(f"Class-conditional drift scores: {method.upper()}")
-        plt.grid(alpha=0.3)
-        plt.legend()
-        plt.tight_layout()
-
-        out_path = os.path.join(out_dir, f"conditional_{method}.png")
-        plt.savefig(out_path, dpi=300)
-        plt.close()
-
 
 # =========================================================
 # Main experiment
@@ -702,6 +654,9 @@ def main():
         "lmt_ref_median": float(lmt_ref["median"]),
         "lmt_ref_mad": float(lmt_ref["mad"]),
     }
+
+    row.update(conditional_scores)
+    rows.append(row)
 
 
     # ================================
@@ -901,19 +856,12 @@ def main():
     # Save outputs
     # -----------------------------------------------------
     csv_path = os.path.join(OUT_DIR, f"public_progressive_{MODEL_NAME}.csv")
-    drift_fig_path = os.path.join(OUT_DIR, f"public_progressive_scores_{MODEL_NAME}.png")
-    perf_fig_path = os.path.join(OUT_DIR, f"public_progressive_performance_{MODEL_NAME}.png")
-
     df_results.to_csv(csv_path, index=False)
-    plot_drift_scores(df_results, drift_fig_path)
-    plot_performance(df_results, perf_fig_path)
-    plot_conditional_scores(df_results, methods=["cade", "chen", "mateen", "gidx", "pe", "lmt"], out_dir=OUT_DIR)
 
     print()
     print("[INFO] Saved:")
     print(csv_path)
-    print(drift_fig_path)
-    print(perf_fig_path)
+
 
     print()
     print("[INFO] Final results:")

@@ -7,10 +7,10 @@ from requests.auth import HTTPBasicAuth
 import csv
 
 # === Config ===
-USERNAME = "aide-ucl"
+USERNAME = "xxx"
 PASSWORD = "xxx"
 OPENSEARCH_HOST = "xxx"
-INDEX_PATTERN = "proxypot-2"
+INDEX_PATTERN = "xxx"
 
 HEADERS = {"Content-Type": "application/json"}
 
